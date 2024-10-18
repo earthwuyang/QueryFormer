@@ -1,3 +1,5 @@
+# all.py
+
 import numpy as np
 import os
 import torch
@@ -10,7 +12,8 @@ import logging
 from model.util import Normalizer, seed_everything
 from model.database_util import (
     generate_column_min_max,
-    get_job_table_sample_direct,
+    sample_all_tables,
+    generate_query_bitmaps,
     generate_histograms_entire_db,
     filterDict2Hist,
     collator,
@@ -73,6 +76,8 @@ class Args:
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     newpath = './results/full/cost/'
     to_predict = 'cost'
+    max_workers = 10  # Limit the number of multiprocessing workers
+
 args = Args()
 
 # Ensure results directory exists
@@ -91,10 +96,10 @@ DB_PARAMS = {
 def load_column_min_max(file_path):
     """
     Loads column min and max values from a CSV file.
-
+    
     Args:
         file_path (str): Path to the CSV file.
-
+    
     Returns:
         dict: Dictionary mapping column names to (min, max).
     """
@@ -107,7 +112,15 @@ def load_column_min_max(file_path):
 column_min_max_file = './data/imdb/column_min_max_vals.csv'
 if not os.path.exists(column_min_max_file):
     logging.info(f"Generating column min-max values and saving to '{column_min_max_file}'.")
-    generate_column_min_max(DB_PARAMS, imdb_schema, output_file=column_min_max_file, t2alias=t2alias)
+    generate_column_min_max(
+        db_params=DB_PARAMS,
+        imdb_schema=imdb_schema,
+        output_file=column_min_max_file,
+        t2alias=t2alias,
+        max_workers=args.max_workers,
+        pool_minconn=1,
+        pool_maxconn=args.max_workers  # Ensure pool_maxconn >= max_workers
+    )
 
 column_min_max_vals = load_column_min_max(column_min_max_file)
 logging.info(f"Loaded column min-max values from '{column_min_max_file}'.")
@@ -116,30 +129,38 @@ logging.info(f"Loaded column min-max values from '{column_min_max_file}'.")
 cost_norm = Normalizer(-3.61192, 12.290855)  # Example values, adjust as needed
 card_norm = Normalizer(1, 100)  # Example values, adjust as needed
 
-# Perform direct sampling
+# Perform sampling per table
 sample_dir = './data/imdb/sampled_data/'
 if not os.path.exists(sample_dir):
     os.makedirs(sample_dir)
 
-# Load the synthetic.csv with appropriate column names
+logging.info("Starting sampling of all tables.")
+sample_all_tables(
+    db_params=DB_PARAMS,
+    imdb_schema=imdb_schema,
+    sample_dir=sample_dir,
+    num_samples=1000,
+    max_workers=args.max_workers
+)
+logging.info("Completed sampling of all tables.")
+
+# Generate table sample bitmaps per query
+# Load all queries
 column_names = ['id', 'tables_joins', 'predicate', 'cardinality']
 query_file_path = './data/imdb/workloads/synthetic.csv'
 query_file = pd.read_csv(query_file_path, sep='#', header=None, names=column_names)
 
 # Verify the DataFrame columns
-# print(query_file.columns)  # Should output: ['id', 'tables_joins', 'predicate', 'cardinality']
+print(query_file.columns)  # Should output: ['id', 'tables_joins', 'predicate', 'cardinality']
 
-# Continue with the rest of your processing
-sampled_data = get_job_table_sample_direct(
-    DB_PARAMS,
-    imdb_schema,
-    query_file,
-    alias2t,
-    num_samples=1000,
+# Generate bitmaps for each query based on pre-sampled table data
+logging.info("Generating table sample bitmaps for each query.")
+sampled_data = generate_query_bitmaps(
+    query_file=query_file,
+    alias2t=alias2t,
     sample_dir=sample_dir
 )
-
-logging.info("Completed sampling for all queries.")
+logging.info("Completed generating table sample bitmaps for all queries.")
 
 # Generate histograms based on entire tables
 hist_dir = './data/imdb/histograms/'
@@ -147,11 +168,12 @@ histogram_file_path = './data/imdb/histogram_entire.csv'
 
 if not os.path.exists(histogram_file_path):
     hist_file_df = generate_histograms_entire_db(
-        DB_PARAMS,
-        imdb_schema,
+        db_params=DB_PARAMS,
+        imdb_schema=imdb_schema,
         hist_dir=hist_dir,
         bin_number=50,
-        t2alias=t2alias
+        t2alias=t2alias,
+        max_workers=args.max_workers
     )
     save_histograms(hist_file_df, save_path=histogram_file_path)
 else:
@@ -180,7 +202,7 @@ logging.info(f"Loaded validation data with {len(val_df)} records.")
 # Initialize PlanTreeDataset
 train_ds = PlanTreeDataset(
     json_df=full_train_df,
-    train=None,
+    workload_df=None,  # Assuming workload_df is not needed for training
     encoding=encoding,
     hist_file=hist_file_df,
     card_norm=card_norm,
@@ -191,7 +213,7 @@ train_ds = PlanTreeDataset(
 
 val_ds = PlanTreeDataset(
     json_df=val_df,
-    train=None,
+    workload_df=None,  # Assuming workload_df is not needed for validation
     encoding=encoding,
     hist_file=hist_file_df,
     card_norm=card_norm,
@@ -225,8 +247,10 @@ logging.info(f"Training completed. Best model saved at: {best_path}")
 
 # Define methods dictionary for evaluation
 methods = {
-    'get_sample': lambda workload_file: get_job_table_sample_direct(
-        DB_PARAMS, imdb_schema, workload_file, alias2t, num_samples=1000, sample_dir=sample_dir, t2alias=t2alias
+    'get_sample': lambda workload_file: generate_query_bitmaps(
+        query_file=pd.read_csv(workload_file, sep='#', header=None, names=['id', 'tables_joins', 'predicate', 'cardinality']),
+        alias2t=alias2t,
+        sample_dir=sample_dir
     ),
     'encoding': encoding,
     'cost_norm': cost_norm,
@@ -237,9 +261,11 @@ methods = {
 }
 
 # Evaluate on 'job-light' workload
+job_light_workload_file = './data/imdb/workloads/job-light.csv'
 job_light_scores, job_light_corr = eval_workload('job-light', methods)
 logging.info(f"Job-Light Workload Evaluation: {job_light_scores}, Correlation: {job_light_corr}")
 
 # Evaluate on 'synthetic' workload
+synthetic_workload_file = './data/imdb/workloads/synthetic.csv'
 synthetic_scores, synthetic_corr = eval_workload('synthetic', methods)
 logging.info(f"Synthetic Workload Evaluation: {synthetic_scores}, Correlation: {synthetic_corr}")

@@ -1,6 +1,5 @@
-#########################
-# model/trainer.py      #
-#########################
+# model/trainer.py
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -9,6 +8,7 @@ import os
 import time
 import torch
 from scipy.stats import pearsonr
+import logging
 
 def chunks(l, n):
     """Yield successive n-sized chunks from l."""
@@ -38,7 +38,7 @@ def print_qerror(preds_unnorm, labels_unnorm, prints=False):
 
     return res
 
-def get_corr(ps, ls): # unnormalised
+def get_corr(ps, ls): # unnormalized
     ps = np.array(ps)
     ls = np.array(ls)
     corr, _ = pearsonr(np.log(ps), np.log(ls))
@@ -59,17 +59,16 @@ def eval_workload(workload, methods):
     """
     get_table_sample = methods['get_sample']
 
-    workload_file_name = './data/imdb/workloads/' + workload
+    workload_file_name = './data/imdb/workloads/' + workload + '.csv'
     table_sample = get_table_sample(workload_file_name)
     plan_df = pd.read_csv('./data/imdb/{}_plan.csv'.format(workload))
-    workload_csv = pd.read_csv('./data/imdb/workloads/{}.csv'.format(workload),sep='#',header=None)
-    workload_csv.columns = ['table','join','predicate','cardinality']
+    workload_csv = pd.read_csv(workload_file_name, sep='#', header=None, names=['id', 'tables_joins', 'predicate', 'cardinality'])
     ds = PlanTreeDataset(plan_df, workload_csv, \
         methods['encoding'], methods['hist_file'], methods['cost_norm'], \
         methods['cost_norm'], 'cost', table_sample)
-
-    eval_score = evaluate(methods['model'], ds, methods['bs'], methods['cost_norm'], methods['device'],True)
-    return eval_score, ds
+    
+    eval_score, corr = evaluate(methods['model'], ds, methods['bs'], methods['cost_norm'], methods['device'], True)
+    return eval_score, corr
 
 
 def evaluate(model, ds, bs, norm, device, prints=False):
@@ -78,7 +77,7 @@ def evaluate(model, ds, bs, norm, device, prints=False):
 
     with torch.no_grad():
         for i in range(0, len(ds), bs):
-            batch, batch_labels = collator(list(zip(*[ds[j] for j in range(i,min(i+bs, len(ds)) ) ])))
+            batch, batch_labels = collator([ds[j] for j in range(i, min(i+bs, len(ds)) )])
 
             batch = batch.to(device)
 
@@ -92,6 +91,7 @@ def evaluate(model, ds, bs, norm, device, prints=False):
         print('Corr: ',corr)
     return scores, corr
 
+
 def train(model, train_ds, val_ds, crit, \
     cost_norm, args, optimizer=None, scheduler=None):
     
@@ -102,15 +102,13 @@ def train(model, train_ds, val_ds, crit, \
     if not optimizer:
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     if not scheduler:
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 20, 0.7)
-
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 20, args.sch_decay)
 
     t0 = time.time()
 
     rng = np.random.default_rng()
 
     best_prev = 999999
-
 
     for epoch in range(epochs):
         losses = 0
@@ -122,13 +120,12 @@ def train(model, train_ds, val_ds, crit, \
 
         cost_labelss = np.array(train_ds.costs)[train_idxs]
 
-
         for idxs in chunks(train_idxs, bs):
             optimizer.zero_grad()
 
-            batch, batch_labels = collator(list(zip(*[train_ds[j] for j in idxs])))
+            batch, batch_labels = collator([train_ds[j] for j in idxs])
             
-            l, r = zip(*(batch_labels))
+            l, r = zip(*batch_labels)
 
             batch_cost_label = torch.FloatTensor(l).to(device)
             batch = batch.to(device)
@@ -155,7 +152,7 @@ def train(model, train_ds, val_ds, crit, \
             test_scores, corrs = evaluate(model, val_ds, bs, cost_norm, device, False)
 
             if test_scores['q_mean'] < best_prev: ## mean mse
-                best_model_path = logging(args, epoch, test_scores, filename = 'log.txt', save_model = True, model = model)
+                best_model_path = logging_fn(args, epoch, test_scores, filename = 'log.txt', save_model = True, model = model)
                 best_prev = test_scores['q_mean']
 
         if epoch % 20 == 0:
@@ -167,7 +164,7 @@ def train(model, train_ds, val_ds, crit, \
     return model, best_model_path
 
 
-def logging(args, epoch, qscores, filename = None, save_model = False, model = None):
+def logging_fn(args, epoch, qscores, filename = None, save_model = False, model = None):
     arg_keys = [attr for attr in dir(args) if not attr.startswith('__')]
     arg_vals = [getattr(args, attr) for attr in arg_keys]
     
@@ -192,10 +189,10 @@ def logging(args, epoch, qscores, filename = None, save_model = False, model = N
         else:
             df = pd.DataFrame(res, index=[0])
             df.to_csv(filename, index=False)
-    if save_model:
+    if save_model and model is not None:
         torch.save({
             'model': model.state_dict(),
             'args' : args
         }, model_checkpoint)
     
-    return res['model']  
+    return res['model']

@@ -1,21 +1,18 @@
-#########################
-# model/dataset.py      #
-#########################
+# model/dataset.py
+
 import torch
 from torch.utils.data import Dataset
 import numpy as np
 import json
 import pandas as pd
-import sys, os
 from collections import deque
 from .database_util import formatFilter, formatJoin, TreeNode, filterDict2Hist
 from .database_util import *
 
-# dataset.py
 
 class PlanTreeDataset(Dataset):
-    def __init__(self, json_df: pd.DataFrame, train: pd.DataFrame, encoding, hist_file, card_norm, cost_norm, to_predict, table_sample):
-        self.table_sample = table_sample  # Dictionary of DataFrames per table
+    def __init__(self, json_df: pd.DataFrame, workload_df: pd.DataFrame, encoding, hist_file, card_norm, cost_norm, to_predict, table_sample):
+        self.table_sample = table_sample  # List of dicts indexed by query_id
         self.encoding = encoding
         self.hist_file = hist_file
         self.length = len(json_df)
@@ -84,10 +81,6 @@ class PlanTreeDataset(Dataset):
             'heights': heights
         }
     
-    # ... (rest of the class remains unchanged)
-
-
-
     def node2dict(self, treeNode):
         '''
         Converts a tree node into a structured dictionary format
@@ -107,30 +100,26 @@ class PlanTreeDataset(Dataset):
         '''
         Performs a topological sort on the tree to get the adjacency list and features
         '''
-#        nodes = []
-        adj_list = [] #from parent to children
+        adj_list = [] # from parent to children
         num_child = []
         features = []
 
-        # initialize a deque for BFS traaversal and adds the root node to visit, 
-        # starting with an index of 0 for the root
+        # initialize a deque for BFS traversal and add the root node to visit, starting with an index of 0 for the root
         toVisit = deque()
-        toVisit.append((0,root_node))
+        toVisit.append((0, root_node))
         next_id = 1
 
-        # Loops wihle there are nodes to visit, popping the next node from the deque
+        # Loops while there are nodes to visit, popping the next node from the deque
         while toVisit:
             idx, node = toVisit.popleft()
-            # nodes.append(node)
             features.append(node.feature)
             num_child.append(len(node.children))
 
             # iterate through the children of the current node, 
-            # add them to the `toVisit` deque, and builds the adjacency list, 
-            # assigning a new ID for each child
+            # add them to the `toVisit` deque, and build the adjacency list, assigning a new ID for each child
             for child in node.children:
-                toVisit.append((next_id,child))
-                adj_list.append((idx,next_id))
+                toVisit.append((next_id, child))
+                adj_list.append((idx, next_id))
                 next_id += 1
         
         return adj_list, num_child, features
@@ -142,7 +131,7 @@ class PlanTreeDataset(Dataset):
 
         nodeType = plan['Node Type']
         typeId = encoding.encode_type(nodeType)
-        card = None #plan['Actual Rows']
+        card = None # plan['Actual Rows'] if needed
         filters, alias = formatFilter(plan)
         join = formatJoin(plan)
         joinId = encoding.encode_join(join)
@@ -150,15 +139,12 @@ class PlanTreeDataset(Dataset):
         
         root = TreeNode(nodeType, typeId, filters, card, joinId, join, filters_encoded)
         
-        self.treeNodes.append(root)
-
         if 'Relation Name' in plan:
             root.table = plan['Relation Name']
             root.table_id = encoding.encode_table(plan['Relation Name'])
         root.query_id = idx
         
-        root.feature = node2feature(root, encoding, self.hist_file, self.table_sample)
-        #    print(root)
+        root.feature = node2feature(root, encoding, self.hist_file, self.table_sample[idx])  # Pass the correct sample data
         if 'Plans' in plan:
             for subplan in plan['Plans']:
                 subplan['parent'] = plan
@@ -167,7 +153,7 @@ class PlanTreeDataset(Dataset):
                 root.addChild(node)
         return root
 
-    def calculate_height(self, adj_list,tree_size):
+    def calculate_height(self, adj_list, tree_size):
         if tree_size == 1:
             return np.array([0])
 
@@ -198,7 +184,6 @@ class PlanTreeDataset(Dataset):
         return node_order 
 
 
-
 def node2feature(node, encoding, hist_file, table_sample):
     '''
     Constructs a feature vector for a given tree node
@@ -208,7 +193,7 @@ def node2feature(node, encoding, hist_file, table_sample):
     # TODO: add sample (or so-called table)
     num_filter = len(node.filterDict['colId'])
     pad = np.zeros((3, 3-num_filter))
-    filts = np.array(list(node.filterDict.values())) #cols, ops, vals
+    filts = np.array(list(node.filterDict.values())) # cols, ops, vals
     ## 3x3 -> 9, get back with reshape 3,3
     filts = np.concatenate((filts, pad), axis=1).flatten() 
     mask = np.zeros(3)
@@ -217,7 +202,6 @@ def node2feature(node, encoding, hist_file, table_sample):
     
     hists = filterDict2Hist(hist_file, node.filterDict, encoding)
 
-
     # If the table ID is 0 (indicating no valid table), a zero array is created;
     # otherwise, a sample array is extracted based on the query ID and table name.
     # table, bitmap, 1 + 1000 bits
@@ -225,7 +209,83 @@ def node2feature(node, encoding, hist_file, table_sample):
     if node.table_id == 0:
         sample = np.zeros(1000)
     else:
-        sample = table_sample[node.query_id][node.table]
+        sample = table_sample.get(node.table, np.zeros(1000))  # Safeguard against missing tables
     
-    #return np.concatenate((type_join,filts,mask))
-    return np.concatenate((type_join, filts, mask, hists, table, sample))
+    # Return the concatenated feature vector
+    return np.concatenate((type_join, filts, mask, hists, table, sample)) 
+
+
+def pad_1d_unsqueeze(x, padlen):
+    x = x + 1 # pad id = 0
+    xlen = x.size(0)
+    if xlen < padlen:
+        new_x = x.new_zeros([padlen], dtype=x.dtype)
+        new_x[:xlen] = x
+        x = new_x
+    return x.unsqueeze(0)
+
+
+def pad_2d_unsqueeze(x, padlen):
+    # Don't know why add 1, kept as per original
+    x = x + 1 # pad id = 0
+    xlen, xdim = x.size()
+    if xlen < padlen:
+        new_x = x.new_zeros([padlen, xdim], dtype=x.dtype) + 1
+        new_x[:xlen, :] = x
+        x = new_x
+    return x.unsqueeze(0)
+
+def pad_rel_pos_unsqueeze(x, padlen):
+    x = x + 1
+    xlen = x.size(0)
+    if xlen < padlen:
+        new_x = x.new_zeros([padlen, padlen], dtype=x.dtype)
+        new_x[:xlen, :xlen] = x
+        x = new_x
+    return x.unsqueeze(0)
+
+def pad_attn_bias_unsqueeze(x, padlen):
+    xlen = x.size(0)
+    if xlen < padlen:
+        new_x = x.new_zeros([padlen, padlen], dtype=x.dtype).fill_(float('-inf'))
+        new_x[:xlen, :xlen] = x
+        new_x[xlen:, :xlen] = 0
+        x = new_x
+    return x.unsqueeze(0)
+
+def collator(small_set):
+    """
+    Collates a list of samples into a Batch object.
+    """
+    batch_dicts = [s[0] for s in small_set]
+    y = [s[1] for s in small_set]
+    xs = [s['x'] for s in batch_dicts]
+    attn_bias = [s['attn_bias'] for s in batch_dicts]
+    rel_pos = [s['rel_pos'] for s in batch_dicts]
+    heights = [s['heights'] for s in batch_dicts]
+    
+    # Concatenate tensors
+    x = torch.cat(xs, dim=0)
+    attn_bias = torch.cat(attn_bias, dim=0)
+    rel_pos = torch.cat(rel_pos, dim=0)
+    heights = torch.cat(heights, dim=0)
+    
+    return Batch(attn_bias, rel_pos, heights, x), y
+
+class Batch():
+    def __init__(self, attn_bias, rel_pos, heights, x, y=None):
+        super(Batch, self).__init__()
+
+        self.heights = heights
+        self.x, self.y = x, y
+        self.attn_bias = attn_bias
+        self.rel_pos = rel_pos
+        
+    def to(self, device):
+
+        self.heights = self.heights.to(device)
+        self.x = self.x.to(device)
+
+        self.attn_bias, self.rel_pos = self.attn_bias.to(device), self.rel_pos.to(device)
+
+        return self
