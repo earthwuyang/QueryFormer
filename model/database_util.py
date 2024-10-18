@@ -1,6 +1,5 @@
-###########################
-# model/database_util.py  #
-###########################
+# model/database_util.py
+
 import numpy as np
 import pandas as pd
 import csv
@@ -8,28 +7,103 @@ import torch
 import psycopg2
 import logging
 import os
-import ast
-import multiprocessing
-from tqdm import tqdm
+from collections import deque
 
-## bfs shld be enough
 def floyd_warshall_rewrite(adjacency_matrix):
     (nrows, ncols) = adjacency_matrix.shape
     assert nrows == ncols
     M = adjacency_matrix.copy().astype('long')
     for i in range(nrows):
         for j in range(ncols):
-            if i == j: 
+            if i == j:
                 M[i][j] = 0
-            elif M[i][j] == 0: 
+            elif M[i][j] == 0:
                 M[i][j] = 60
-    
+
     for k in range(nrows):
         for i in range(nrows):
             for j in range(nrows):
                 M[i][j] = min(M[i][j], M[i][k]+M[k][j])
     return M
 
+def generate_column_min_max(db_params, imdb_schema, output_file='./data/imdb/column_min_max_vals.csv', t2alias={}):
+    """
+    Connects to the PostgreSQL database, extracts min, max, cardinality, and number of unique values
+    for each column in the specified tables, and saves the statistics to a CSV file.
+    
+    Args:
+        db_params (dict): Database connection parameters.
+        imdb_schema (dict): Schema dictionary mapping table names to their columns.
+        output_file (str): Path to save the generated CSV file.
+        t2alias (dict): Table aliases.
+    """
+    # Initialize logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
+    
+    try:
+        # Establish database connection
+        conn = psycopg2.connect(**db_params)
+        conn.set_session(autocommit=True)
+        cur = conn.cursor()
+        logging.info("Connected to the PostgreSQL database successfully.")
+    except Exception as e:
+        logging.error(f"Failed to connect to the database: {e}")
+        raise
+    
+    # List to hold column statistics
+    stats_records = []
+    
+    for table, columns in imdb_schema.items():
+        for column in columns:
+            # Skip 'sid' column if present
+            if column == 'sid':
+                continue
+            
+            try:
+                # Construct SQL queries to fetch min, max, count, and distinct count
+                min_query = f"SELECT MIN({column}) FROM {table};"
+                max_query = f"SELECT MAX({column}) FROM {table};"
+                count_query = f"SELECT COUNT({column}) FROM {table} WHERE {column} IS NOT NULL;"
+                distinct_query = f"SELECT COUNT(DISTINCT {column}) FROM {table} WHERE {column} IS NOT NULL;"
+                
+                # Execute queries
+                cur.execute(min_query)
+                min_val = cur.fetchone()[0]
+                
+                cur.execute(max_query)
+                max_val = cur.fetchone()[0]
+                
+                cur.execute(count_query)
+                cardinality = cur.fetchone()[0]
+                
+                cur.execute(distinct_query)
+                num_unique = cur.fetchone()[0]
+                
+                # Append the statistics to the list
+                stats_records.append({
+                    'name': f"{t2alias.get(table, table[:2])}.{column}",
+                    'min': min_val,
+                    'max': max_val,
+                    'cardinality': cardinality,
+                    'num_unique_values': num_unique
+                })
+                
+                logging.info(f"Extracted stats for '{table}.{column}': min={min_val}, max={max_val}, cardinality={cardinality}, unique={num_unique}")
+                
+            except Exception as e:
+                logging.error(f"Error extracting stats for '{table}.{column}': {e}")
+                continue
+    
+    # Close the cursor and connection
+    cur.close()
+    conn.close()
+    logging.info("Closed the database connection.")
+    
+    # Create DataFrame and save to CSV
+    stats_df = pd.DataFrame(stats_records)
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    stats_df.to_csv(output_file, index=False)
+    logging.info(f"Saved column statistics to '{output_file}'.")
 
 def extract_column_stats(args):
     """
@@ -93,9 +167,8 @@ def extract_column_stats(args):
     except Exception as e:
         logging.error(f"Error extracting stats for '{table}.{column}': {e}")
         return None
-    
 
-def generate_column_min_max(db_params, imdb_schema, output_file='./data/imdb/column_min_max_vals.csv', t2alias={}):
+def generate_column_min_max_multiprocessing(db_params, imdb_schema, output_file='./data/imdb/column_min_max_vals.csv', t2alias={}):
     """
     Connects to the PostgreSQL database, extracts min, max, cardinality, and number of unique values
     for each column in the specified tables using multiprocessing, and saves the statistics to a CSV file.
@@ -109,6 +182,8 @@ def generate_column_min_max(db_params, imdb_schema, output_file='./data/imdb/col
     Returns:
         None
     """
+    import multiprocessing
+
     # Initialize logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
     
@@ -142,139 +217,6 @@ def generate_column_min_max(db_params, imdb_schema, output_file='./data/imdb/col
     stats_df.to_csv(output_file, index=False)
     logging.info(f"Saved column statistics to '{output_file}'.")
 
-
-def save_histograms(hist_file_df, save_path='./data/imdb/histogram_entire.csv'):
-    """
-    Saves the histograms DataFrame to a CSV file.
-    
-    Args:
-        hist_file_df (pd.DataFrame): DataFrame containing histograms.
-        save_path (str): Path to save the histogram CSV.
-    """
-    hist_file_df.to_csv(save_path, index=False)
-    logging.info(f"Saved entire table histograms to '{save_path}'.")
-
-def load_entire_histograms(load_path='./data/imdb/histogram_entire.csv'):
-    """
-    Loads the histograms DataFrame from a CSV file.
-    
-    Args:
-        load_path (str): Path to load the histogram CSV.
-    
-    Returns:
-        pd.DataFrame: DataFrame containing histograms.
-    """
-    if not os.path.exists(load_path):
-        logging.error(f"Histogram file '{load_path}' does not exist.")
-        raise FileNotFoundError(f"Histogram file '{load_path}' does not exist.")
-    hist_file_df = pd.read_csv(load_path)
-    # Safely parse the 'bins' column
-    hist_file_df['bins'] = hist_file_df['bins'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
-    logging.info(f"Loaded entire table histograms from '{load_path}'.")
-    return hist_file_df
-def sample_single_query(args):
-    """
-    Samples tables for a single query based on its predicates.
-
-    Args:
-        args (tuple): Contains (query_row, alias2t, db_params, sample_dir, num_samples).
-
-    Returns:
-        dict: table_sample dictionary for the query.
-    """
-    query_row, alias2t, db_params, sample_dir, num_samples = args
-    table_sample = {}
-    preds = query_row['predicate'].split(',')
-
-    try:
-        # Establish a separate database connection for each subprocess
-        conn = psycopg2.connect(**db_params)
-        conn.set_session(autocommit=True)
-        cur = conn.cursor()
-
-        for i in range(0, len(preds), 3):
-            try:
-                left, op, right = preds[i:i+3]
-                alias, col = left.split('.')
-                table = alias2t.get(alias)
-                if not table:
-                    logging.warning(f"Alias '{alias}' not found in alias2t mapping.")
-                    continue
-
-                # Construct the predicate string
-                pred_string = ''.join((col, op, right))
-                q = 'SELECT id FROM {} WHERE {}'.format(table, pred_string)
-                cur.execute(q)
-                ids = cur.fetchall()
-                ids = np.array(ids).flatten()
-
-                sps = np.zeros(num_samples, dtype='uint8')
-                if ids.size > 0:
-                    # Ensure ids are within the valid range
-                    valid_ids = ids[ids < num_samples]
-                    sps[valid_ids] = 1
-
-                if table in table_sample:
-                    table_sample[table] = table_sample[table] & sps
-                else:
-                    table_sample[table] = sps
-
-            except Exception as e:
-                logging.error(f"Error processing predicate '{pred_string}' for query_id={query_row['id']} on table '{table}': {e}")
-                continue
-
-        cur.close()
-        conn.close()
-
-        # Save sampled data to CSV for each table within the query
-        for table, sps in table_sample.items():
-            sample_file = os.path.join(sample_dir, f"query_{query_row['id']}_{table}_sample.csv")
-            df = pd.DataFrame({'id': np.arange(num_samples), 'sampled': sps})
-            df.to_csv(sample_file, index=False)
-
-    except Exception as e:
-        logging.error(f"Database connection failed for query_id={query_row['id']}: {e}")
-        return table_sample  # Return empty dict on failure
-
-    return table_sample
-
-
-def get_job_table_sample_direct(db_params, imdb_schema, query_file, alias2t, num_samples=1000, sample_dir='./data/imdb/sampled_data/'):
-    """
-    Samples data directly from the IMDb database using multiprocessing.
-
-    Args:
-        db_params (dict): Database connection parameters.
-        imdb_schema (dict): Schema dictionary mapping table names to their columns.
-        query_file (pd.DataFrame): DataFrame containing queries.
-        alias2t (dict): Mapping from table aliases to table names.
-        num_samples (int): Number of samples to fetch per table.
-        sample_dir (str): Directory to save/load sampled CSV files.
-
-    Returns:
-        list: List of table_sample dictionaries indexed by query_id.
-    """
-    os.makedirs(sample_dir, exist_ok=True)
-    table_samples = []
-
-    # Prepare arguments for each query
-    args_list = [
-        (row, alias2t, db_params, sample_dir, num_samples)
-        for idx, row in query_file.iterrows()
-    ]
-
-    # Determine the number of worker processes
-    num_workers = min(len(args_list), multiprocessing.cpu_count())
-
-    with multiprocessing.Pool(processes=num_workers) as pool:
-        results = tqdm(pool.map(sample_single_query, args_list))
-
-    table_samples = results  # List indexed by query_id
-
-    return table_samples
-
-
-
 def generate_histogram_single(args):
     """
     Generates histogram for a single table-column pair.
@@ -283,7 +225,7 @@ def generate_histogram_single(args):
         args (tuple): Contains (table, column, db_params, hist_dir, bin_number, t2alias).
 
     Returns:
-        dict: Histogram record for the table-column.
+        dict or None: Histogram record for the table-column or None if an error occurs.
     """
     table, column, db_params, hist_dir, bin_number, t2alias = args
 
@@ -350,11 +292,13 @@ def generate_histograms_entire_db(db_params, imdb_schema, hist_dir='./data/imdb/
         imdb_schema (dict): Schema dictionary mapping table names to their columns.
         hist_dir (str): Directory to save histogram CSV files.
         bin_number (int): Number of bins for the histograms.
-        t2alias (dict): Mapping from table aliases to table names.
+        t2alias (dict): Table aliases.
 
     Returns:
         pd.DataFrame: DataFrame containing histograms for each table.column.
     """
+    import multiprocessing
+
     os.makedirs(hist_dir, exist_ok=True)
     hist_records = []
 
@@ -368,6 +312,7 @@ def generate_histograms_entire_db(db_params, imdb_schema, hist_dir='./data/imdb/
 
     # Determine the number of worker processes
     num_workers = min(len(args_list), multiprocessing.cpu_count())
+    logging.info(f"Starting multiprocessing with {num_workers} workers for {len(args_list)} histogram tasks.")
 
     with multiprocessing.Pool(processes=num_workers) as pool:
         results = pool.map(generate_histogram_single, args_list)
@@ -380,6 +325,203 @@ def generate_histograms_entire_db(db_params, imdb_schema, hist_dir='./data/imdb/
     hist_file_df = pd.DataFrame(hist_records)
 
     return hist_file_df
+
+def generate_histograms_entire_db_multiprocessing(db_params, imdb_schema, hist_dir='./data/imdb/histograms/', bin_number=50, t2alias={}):
+    """
+    Deprecated: Use generate_histograms_entire_db instead.
+    """
+    return generate_histograms_entire_db(db_params, imdb_schema, hist_dir, bin_number, t2alias)
+
+def filterDict2Hist(hist_file_df, filterDict, encoding):
+    """
+    Converts filter dictionaries to histogram embeddings using entire table histograms.
+    
+    Args:
+        hist_file_df (pd.DataFrame): DataFrame containing histogram bins.
+        filterDict (dict): Dictionary containing filter information.
+        encoding (Encoding): Encoding object with necessary mappings.
+    
+    Returns:
+        np.ndarray: Flattened histogram features.
+    """
+    bins_per_filter = len(hist_file_df['bins'].iloc[0]) - 1
+    num_filters = len(filterDict['colId'])
+    res = np.zeros((num_filters, bins_per_filter))
+    
+    for i in range(num_filters):
+        colId = filterDict['colId'][i]
+        col = encoding.idx2col.get(colId, 'NA')
+        if col == 'NA':
+            continue
+        hist_row = hist_file_df[hist_file_df['table_column'] == col]
+        if hist_row.empty:
+            logging.warning(f"No histogram found for column '{col}'. Using zero histogram.")
+            continue
+        bins = hist_row['bins'].iloc[0]
+        
+        opId = filterDict['opId'][i]
+        op = encoding.idx2op.get(opId, 'NA')
+        val = filterDict['val'][i]
+        
+        # Normalize the value based on column min-max
+        mini, maxi = encoding.column_min_max_vals.get(col, (0, 1))
+        val_unnorm = val * (maxi - mini) + mini
+        
+        # Determine the bin range based on the operator
+        if op == '=':
+            # Find the bin where val_unnorm fits
+            bin_idx = np.digitize(val_unnorm, bins) - 1
+            if 0 <= bin_idx < bins_per_filter:
+                res[i, bin_idx] = 1
+        elif op == '<':
+            bin_idx = np.digitize(val_unnorm, bins) - 1
+            if bin_idx > 0:
+                res[i, :bin_idx] = 1
+        elif op == '>':
+            bin_idx = np.digitize(val_unnorm, bins) - 1
+            if bin_idx < bins_per_filter - 1:
+                res[i, bin_idx + 1:] = 1
+        else:
+            logging.warning(f"Unsupported operator '{op}'. Using zero histogram for this filter.")
+    
+    # Flatten the histogram features
+    hist_features = res.flatten()
+    return hist_features
+
+def load_entire_histograms(load_path='./data/imdb/histogram_entire.csv'):
+    """
+    Loads the histograms DataFrame from a CSV file.
+    
+    Args:
+        load_path (str): Path to load the histogram CSV.
+    
+    Returns:
+        pd.DataFrame: DataFrame containing histograms.
+    """
+    if not os.path.exists(load_path):
+        logging.error(f"Histogram file '{load_path}' does not exist.")
+        raise FileNotFoundError(f"Histogram file '{load_path}' does not exist.")
+    hist_file_df = pd.read_csv(load_path)
+    # Convert 'bins' from string representation back to list
+    hist_file_df['bins'] = hist_file_df['bins'].apply(lambda x: eval(x) if isinstance(x, str) else x)
+    logging.info(f"Loaded entire table histograms from '{load_path}'.")
+    return hist_file_df
+
+def save_histograms(hist_file_df, save_path='./data/imdb/histogram_entire.csv'):
+    """
+    Saves the histograms DataFrame to a CSV file.
+    
+    Args:
+        hist_file_df (pd.DataFrame): DataFrame containing histograms.
+        save_path (str): Path to save the histogram CSV.
+    """
+    hist_file_df.to_csv(save_path, index=False)
+    logging.info(f"Saved entire table histograms to '{save_path}'.")
+
+def get_job_table_sample_direct(db_params, imdb_schema, query_file, alias2t, num_samples=1000, sample_dir='./data/imdb/sampled_data/'):
+    """
+    Samples data directly from the IMDb database using multiprocessing.
+
+    Args:
+        db_params (dict): Database connection parameters.
+        imdb_schema (dict): Schema dictionary mapping table names to their columns.
+        query_file (pd.DataFrame): DataFrame containing queries.
+        alias2t (dict): Mapping from table aliases to table names.
+        num_samples (int): Number of samples to fetch per table.
+        sample_dir (str): Directory to save/load sampled CSV files.
+
+    Returns:
+        list: List of table_sample dictionaries indexed by query_id.
+    """
+    import multiprocessing
+
+    os.makedirs(sample_dir, exist_ok=True)
+    table_samples = []
+
+    # Prepare arguments for each query
+    args_list = []
+    for idx, row in query_file.iterrows():
+        args_list.append((row, alias2t, db_params, sample_dir, num_samples))
+
+    # Determine the number of worker processes
+    num_workers = min(len(args_list), multiprocessing.cpu_count())
+    logging.info(f"Starting multiprocessing with {num_workers} workers for {len(args_list)} queries.")
+
+    with multiprocessing.Pool(processes=num_workers) as pool:
+        results = pool.map(sample_single_query, args_list)
+
+    table_samples = results  # List indexed by query_id
+
+    return table_samples
+
+def sample_single_query(args):
+    """
+    Samples tables for a single query based on its predicates.
+
+    Args:
+        args (tuple): Contains (query_row, alias2t, db_params, sample_dir, num_samples).
+
+    Returns:
+        dict: table_sample dictionary for the query.
+    """
+    query_row, alias2t, db_params, sample_dir, num_samples = args
+    table_sample = {}
+    preds = query_row['predicate'].split(',')
+
+    try:
+        # Establish a separate database connection for each subprocess
+        conn = psycopg2.connect(**db_params)
+        conn.set_session(autocommit=True)
+        cur = conn.cursor()
+    except Exception as e:
+        logging.error(f"Database connection failed for query_id={query_row.name}: {e}")
+        return table_sample  # Return empty dict on failure
+
+    for i in range(0, len(preds), 3):
+        try:
+            left, op, right = preds[i:i+3]
+            alias_col = left.strip()
+            if '.' not in alias_col:
+                logging.warning(f"Invalid predicate format '{left}' in query_id={query_row.name}. Skipping.")
+                continue
+            alias, col = alias_col.split('.')
+            table = alias2t.get(alias)
+            if not table:
+                logging.warning(f"Alias '{alias}' not found in alias2t mapping for query_id={query_row.name}. Skipping.")
+                continue
+
+            pred_string = f"{col}{op}{right}"
+            q = f"SELECT sid FROM {table} WHERE {pred_string}"
+
+            cur.execute(q)
+            sids = cur.fetchall()
+            sids = np.array(sids).flatten()
+
+            sps = np.zeros(num_samples, dtype='uint8')
+            if sids.size > 0:
+                # Ensure sids are within the valid range
+                valid_sids = sids[sids < num_samples]
+                sps[valid_sids] = 1
+
+            if table in table_sample:
+                table_sample[table] = table_sample[table] & sps
+            else:
+                table_sample[table] = sps
+
+        except Exception as e:
+            logging.error(f"Error processing predicate '{pred_string}' for query_id={query_row.name}: {e}")
+            continue
+
+    cur.close()
+    conn.close()
+
+    # Save sampled data to CSV for each table within the query
+    for table, sps in table_sample.items():
+        sample_file = os.path.join(sample_dir, f"query_{query_row.name}_{table}_sample.csv")
+        df = pd.DataFrame({'sid': np.arange(num_samples), 'sampled': sps})
+        df.to_csv(sample_file, index=False)
+
+    return table_sample
 
 
 def re_bin(hist_file, target_number):

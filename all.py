@@ -1,3 +1,4 @@
+# all.py is the main file to run the entire pipeline of the QueryFormer model.
 import numpy as np
 import os
 import torch
@@ -6,6 +7,7 @@ import time
 import pandas as pd
 from scipy.stats import pearsonr
 import logging
+import csv
 
 from model.util import Normalizer, seed_everything
 from model.database_util import (
@@ -47,7 +49,7 @@ t2alias = {
 
 alias2t = {v: k for k, v in t2alias.items()}
 
-# Initialize Encoding
+# Initialize column to index mapping
 col2idx = {
     't.id': 0, 't.kind_id': 1, 't.production_year': 2,
     'mc.id': 3, 'mc.company_id': 4, 'mc.movie_id': 5, 'mc.company_type_id': 6,
@@ -57,7 +59,7 @@ col2idx = {
     'mk.id': 17, 'mk.movie_id': 18, 'mk.keyword_id': 19, 'NA': 20
 }
 
-# Define Args
+# Define Args as a class for better structure
 class Args:
     bs = 128
     lr = 0.001
@@ -73,6 +75,7 @@ class Args:
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     newpath = './results/full/cost/'
     to_predict = 'cost'
+
 args = Args()
 
 # Ensure results directory exists
@@ -87,14 +90,14 @@ DB_PARAMS = {
     'port': "5432"
 }
 
-# Load column_min_max_vals from CSV
+# Function to load column min-max values
 def load_column_min_max(file_path):
     """
     Loads column min and max values from a CSV file.
-
+    
     Args:
         file_path (str): Path to the CSV file.
-
+    
     Returns:
         dict: Dictionary mapping column names to (min, max).
     """
@@ -104,10 +107,16 @@ def load_column_min_max(file_path):
         column_min_max_vals[row['name']] = (row['min'], row['max'])
     return column_min_max_vals
 
+# Load or generate column_min_max_vals
 column_min_max_file = './data/imdb/column_min_max_vals.csv'
 if not os.path.exists(column_min_max_file):
     logging.info(f"Generating column min-max values and saving to '{column_min_max_file}'.")
-    generate_column_min_max(DB_PARAMS, imdb_schema, output_file=column_min_max_file, t2alias=t2alias)
+    generate_column_min_max(
+        db_params=DB_PARAMS,
+        imdb_schema=imdb_schema,
+        output_file=column_min_max_file,
+        t2alias=t2alias
+    )
 
 column_min_max_vals = load_column_min_max(column_min_max_file)
 logging.info(f"Loaded column min-max values from '{column_min_max_file}'.")
@@ -120,26 +129,9 @@ card_norm = Normalizer(1, 100)  # Example values, adjust as needed
 sample_dir = './data/imdb/sampled_data/'
 if not os.path.exists(sample_dir):
     os.makedirs(sample_dir)
-
-# Load the synthetic.csv with appropriate column names
 column_names = ['id', 'tables_joins', 'predicate', 'cardinality']
 query_file_path = './data/imdb/workloads/synthetic.csv'
 query_file = pd.read_csv(query_file_path, sep='#', header=None, names=column_names)
-
-# Verify the DataFrame columns
-# print(query_file.columns)  # Should output: ['id', 'tables_joins', 'predicate', 'cardinality']
-
-# Continue with the rest of your processing
-sampled_data = get_job_table_sample_direct(
-    DB_PARAMS,
-    imdb_schema,
-    query_file,
-    alias2t,
-    num_samples=1000,
-    sample_dir=sample_dir
-)
-
-logging.info("Completed sampling for all queries.")
 
 # Generate histograms based on entire tables
 hist_dir = './data/imdb/histograms/'
@@ -147,8 +139,8 @@ histogram_file_path = './data/imdb/histogram_entire.csv'
 
 if not os.path.exists(histogram_file_path):
     hist_file_df = generate_histograms_entire_db(
-        DB_PARAMS,
-        imdb_schema,
+        db_params=DB_PARAMS,
+        imdb_schema=imdb_schema,
         hist_dir=hist_dir,
         bin_number=50,
         t2alias=t2alias
@@ -157,6 +149,7 @@ if not os.path.exists(histogram_file_path):
 else:
     hist_file_df = load_entire_histograms(load_path=histogram_file_path)
 
+# Initialize Encoding
 encoding = Encoding(column_min_max_vals=column_min_max_vals, col2idx=col2idx)
 logging.info("Initialized Encoding object.")
 
@@ -166,16 +159,42 @@ seed_everything()
 # Load training data (adjust the range as needed)
 imdb_path = './data/imdb/'
 train_parts = [f"{imdb_path}plan_and_cost/train_plan_part{i}.csv" for i in range(2)]  # Example: parts 0 and 1
-dfs = [pd.read_csv(file) for file in train_parts]
-full_train_df = pd.concat(dfs, ignore_index=True)
+dfs = []
+for file in train_parts:
+    if os.path.exists(file):
+        df = pd.read_csv(file)
+        dfs.append(df)
+        logging.info(f"Loaded training data from '{file}' with {len(df)} records.")
+    else:
+        logging.warning(f"Training data file '{file}' does not exist and will be skipped.")
+full_train_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 # Load validation data (adjust the range as needed)
 val_parts = [f"{imdb_path}plan_and_cost/train_plan_part{i}.csv" for i in range(18, 20)]
-val_dfs = [pd.read_csv(file) for file in val_parts]
-val_df = pd.concat(val_dfs, ignore_index=True)
+val_dfs = []
+for file in val_parts:
+    if os.path.exists(file):
+        df = pd.read_csv(file)
+        val_dfs.append(df)
+        logging.info(f"Loaded validation data from '{file}' with {len(df)} records.")
+    else:
+        logging.warning(f"Validation data file '{file}' does not exist and will be skipped.")
+val_df = pd.concat(val_dfs, ignore_index=True) if val_dfs else pd.DataFrame()
 
 logging.info(f"Loaded training data with {len(full_train_df)} records.")
 logging.info(f"Loaded validation data with {len(val_df)} records.")
+
+# Perform direct sampling
+sampled_data = get_job_table_sample_direct(
+    db_params=DB_PARAMS,
+    imdb_schema=imdb_schema,
+    query_file=query_file,
+    alias2t=alias2t,
+    num_samples=1000,
+    sample_dir=sample_dir
+)
+
+logging.info("Completed sampling for all queries.")
 
 # Initialize PlanTreeDataset
 train_ds = PlanTreeDataset(
@@ -226,7 +245,12 @@ logging.info(f"Training completed. Best model saved at: {best_path}")
 # Define methods dictionary for evaluation
 methods = {
     'get_sample': lambda workload_file: get_job_table_sample_direct(
-        DB_PARAMS, imdb_schema, workload_file, alias2t, num_samples=1000, sample_dir=sample_dir, t2alias=t2alias
+        db_params=DB_PARAMS,
+        imdb_schema=imdb_schema,
+        query_file=query_file,
+        alias2t=alias2t,
+        num_samples=1000,
+        sample_dir=sample_dir
     ),
     'encoding': encoding,
     'cost_norm': cost_norm,
