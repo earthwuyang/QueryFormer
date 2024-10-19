@@ -63,7 +63,7 @@ col2idx = {
 
 # Define Args
 class Args:
-    bs = 4
+    bs = 36
     lr = 0.001
     epochs = 100
     clip_size = 50
@@ -74,8 +74,8 @@ class Args:
     n_layers = 8
     dropout = 0.1
     sch_decay = 0.6
-    # device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    device = 'cpu'
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    # device = 'cpu'
     newpath = './results/full/cost/'
     to_predict = 'cost'
     max_workers = 10  # Limit the number of multiprocessing workers

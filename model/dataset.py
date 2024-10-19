@@ -38,8 +38,7 @@ class PlanTreeDataset(Dataset):
             raise Exception('Unknown to_predict type')
         
         idxs = list(json_df['id'])
-        print(f"table_sample length      : {len(self.table_sample)}")
-        print(f"idx length               : {len(idxs)}")
+
 
         self.treeNodes = []
         self.collated_dicts = [self.js_node2dict(i, node) for i, node in zip(idxs, nodes)]
@@ -146,7 +145,6 @@ class PlanTreeDataset(Dataset):
             root.table = plan['Relation Name']
             root.table_id = encoding.encode_table(plan['Relation Name'])
         root.query_id = idx
-        # print(f"root: {root}")
         
         root.feature = node2feature(root, encoding, self.hist_file, self.table_sample[root.query_id], self.alias2t)  # Pass the correct sample data
         if 'Plans' in plan:
@@ -186,6 +184,7 @@ class PlanTreeDataset(Dataset):
 
         # return the calculated heights for each node based on their order of evaluation
         return node_order 
+
 
 def node2feature(node, encoding, hist_file, table_sample, alias2t):
     # Type and join IDs
@@ -234,7 +233,7 @@ def node2feature(node, encoding, hist_file, table_sample, alias2t):
     max_filters = MAX_FILTERS
     filter_pad_length = max_filters - num_filters
     pad_value_col = encoding.col2idx.get('NA', 0)
-    pad_value_op = encoding.op2idx.get('NA', 3)
+    pad_value_op = encoding.op2idx.get('NA', 3)  # Updated to match new op2idx
 
     # Ensure filter arrays are numpy arrays
     filter_cols = np.array(filter_cols)
@@ -267,7 +266,16 @@ def node2feature(node, encoding, hist_file, table_sample, alias2t):
     # Concatenate all features
     feature_vector = np.concatenate([type_join, filters, filter_mask, hists, table_id, sample])
 
+    # Debugging: Check the maximum opId
+    max_op_id = filter_ops.max() if len(filter_ops) > 0 else 0
+    # logging.debug(f"Max opId in node.feature: {max_op_id}")
+    if max_op_id >= len(encoding.op2idx):
+        logging.error(f"opId {max_op_id} exceeds embedding size {len(encoding.op2idx)}. Assigning 'NA'.")
+        exit()
+        # Optionally, set opId to 'NA' here if needed
+
     return feature_vector
+
 
 
 

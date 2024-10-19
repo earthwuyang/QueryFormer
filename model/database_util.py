@@ -603,26 +603,25 @@ class Encoding:
                     'val': [0.0]}
         res = {'colId': [], 'opId': [], 'val': []}
         for filt in filters:
-            filt = filt.strip()
-            if filt.startswith('(') and filt.endswith(')'):
-                filt = filt[1:-1]
-            try:
-                col, op, num = filt.strip().split(' ')
-                if '.' not in col:
-                    if alias:
-                        column = f"{alias}.{col}"
+            filt = ''.join(c for c in filt if c not in '()')
+            fs = filt.split(' AND ')
+            for f in fs:
+                try:
+                    col, op, num = f.split(' ')
+                    column = f"{alias}.{col}"
+                    if op not in self.op2idx:
+                        logging.warning(f"Operator '{op}' not found in op2idx mapping.")
+                        op_idx = self.op2idx.get('NA', 3)
                     else:
-                        logging.warning(f"Alias not found for column '{col}'. Skipping.")
-                        continue
-                else:
-                    column = col
-                res['colId'].append(self.col2idx.get(column, self.col2idx.get('NA', 0)))
-                res['opId'].append(self.op2idx.get(op, self.op2idx.get('NA', 3)))
-                res['val'].append(self.normalize_val(column, float(num)))
-            except ValueError:
-                logging.error(f"Error encoding filter '{filt}'. Skipping.")
-                continue
+                        op_idx = self.op2idx[op]
+                    res['colId'].append(self.col2idx.get(column, self.col2idx.get('NA', 0)))
+                    res['opId'].append(op_idx)
+                    res['val'].append(self.normalize_val(column, float(num)))
+                except ValueError:
+                    logging.error(f"Error encoding filter '{f}'. Skipping.")
+                    continue
         return res
+
 
     
     def encode_join(self, join):
@@ -705,40 +704,40 @@ class Batch:
     def __len__(self):
         return self.heights.size(0)
 
-def pad_1d_unsqueeze(x, padlen):
-    x = x + 1  # pad id = 0
-    xlen = x.size(0)
-    if xlen < padlen:
-        new_x = x.new_zeros([padlen], dtype=x.dtype)
-        new_x[:xlen] = x
-        x = new_x
-    return x.unsqueeze(0)
+# def pad_1d_unsqueeze(x, padlen):
+#     x = x + 1  # pad id = 0
+#     xlen = x.size(0)
+#     if xlen < padlen:
+#         new_x = x.new_zeros([padlen], dtype=x.dtype)
+#         new_x[:xlen] = x
+#         x = new_x
+#     return x.unsqueeze(0)
 
-def pad_2d_unsqueeze(x, padlen):
-    xlen, xdim = x.size()
-    if xlen < padlen:
-        new_x = x.new_zeros([padlen, xdim], dtype=x.dtype) + 1
-        new_x[:xlen, :] = x
-        x = new_x
-    return x.unsqueeze(0)
+# def pad_2d_unsqueeze(x, padlen):
+#     xlen, xdim = x.size()
+#     if xlen < padlen:
+#         new_x = x.new_zeros([padlen, xdim], dtype=x.dtype) + 1
+#         new_x[:xlen, :] = x
+#         x = new_x
+#     return x.unsqueeze(0)
 
-def pad_rel_pos_unsqueeze(x, padlen):
-    x = x + 1
-    xlen = x.size(0)
-    if xlen < padlen:
-        new_x = x.new_zeros([padlen, padlen], dtype=x.dtype)
-        new_x[:xlen, :xlen] = x
-        x = new_x
-    return x.unsqueeze(0)
+# def pad_rel_pos_unsqueeze(x, padlen):
+#     x = x + 1
+#     xlen = x.size(0)
+#     if xlen < padlen:
+#         new_x = x.new_zeros([padlen, padlen], dtype=x.dtype)
+#         new_x[:xlen, :xlen] = x
+#         x = new_x
+#     return x.unsqueeze(0)
 
-def pad_attn_bias_unsqueeze(x, padlen):
-    xlen = x.size(0)
-    if xlen < padlen:
-        new_x = x.new_zeros([padlen, padlen], dtype=x.dtype).fill_(float('-inf'))
-        new_x[:xlen, :xlen] = x
-        new_x[xlen:, :xlen] = 0
-        x = new_x
-    return x.unsqueeze(0)
+# def pad_attn_bias_unsqueeze(x, padlen):
+#     xlen = x.size(0)
+#     if xlen < padlen:
+#         new_x = x.new_zeros([padlen, padlen], dtype=x.dtype).fill_(float('-inf'))
+#         new_x[:xlen, :xlen] = x
+#         new_x[xlen:, :xlen] = 0
+#         x = new_x
+#     return x.unsqueeze(0)
 
 def collator(small_set):
     y = small_set[1]
@@ -818,7 +817,7 @@ class Encoding:
         return self.type2idx[nodeType]
 
 HIST_BINS = 50  # Number of bins in each histogram
-MAX_FILTERS = 3  # Maximum number of filters to consider
+MAX_FILTERS = 30  # Maximum number of filters to consider
 SAMPLE_SIZE = 1000  # Size of the sample data
 
 def filterDict2Hist(hist_file, filterDict, encoding, hist_bins=HIST_BINS, max_filters=MAX_FILTERS):

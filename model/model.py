@@ -51,7 +51,7 @@ class FeatureEmbed(nn.Module):
         self.tableEmbed = nn.Embedding(tables, embed_size)
         
         self.columnEmbed = nn.Embedding(columns, embed_size)
-        self.opEmbed = nn.Embedding(ops, embed_size//8)
+        self.opEmbed = nn.Embedding(ops + 1, embed_size//8)
 
         self.linearFilter2 = nn.Linear(embed_size+embed_size//8+1, embed_size+embed_size//8+1)
         self.linearFilter = nn.Linear(embed_size+embed_size//8+1, embed_size+embed_size//8+1)
@@ -74,11 +74,13 @@ class FeatureEmbed(nn.Module):
     # input: B by 14 (type, join, f1, f2, f3, mask1, mask2, mask3)
     def forward(self, feature):
 
-        typeId, joinId, filtersId, filtersMask, hists, table_sample = torch.split(feature,(1,1,9,3,self.bin_number*3,1001), dim = -1)
+        # typeId, joinId, filtersId, filtersMask, hists, table_sample = torch.split(feature,(1,1,9,3,self.bin_number*3,1001), dim = -1)
+        typeId, joinId, filtersId, filtersMask, hists, table_sample = torch.split(feature,(1,1,30*3,30,self.bin_number*30,1001), dim = -1)
         
         typeEmb = self.getType(typeId)
         joinEmb = self.getJoin(joinId)
         filterEmbed = self.getFilter(filtersId, filtersMask)
+        
         
         histEmb = self.getHist(hists, filtersMask)
         tableEmb = self.getTable(table_sample)
@@ -111,7 +113,7 @@ class FeatureEmbed(nn.Module):
 
     def getHist(self, hists, filtersMask):
         # batch * 50 * 3
-        histExpand = hists.view(-1,self.bin_number,3).transpose(1,2)
+        histExpand = hists.view(-1,self.bin_number, 30).transpose(1,2)
         
         emb = self.linearHist(histExpand)
         emb[~filtersMask.bool()] = 0.  # mask out space holder
@@ -125,13 +127,15 @@ class FeatureEmbed(nn.Module):
         
     def getFilter(self, filtersId, filtersMask):
         ## get Filters, then apply mask
-        filterExpand = filtersId.view(-1,3,3).transpose(1,2)
+        filterExpand = filtersId.reshape(-1,3,30).transpose(1,2) # [batch_size, 3*max_filters] -> [batch_size, 3, max_filters] -> [batch_size, max_filters, 3]
         colsId = filterExpand[:,:,0].long()
         opsId = filterExpand[:,:,1].long()
         vals = filterExpand[:,:,2].unsqueeze(-1) # b by 3 by 1
+
         
         # b by 3 by embed_dim
-        
+    
+
         col = self.columnEmbed(colsId)
         op = self.opEmbed(opsId)
         
@@ -213,7 +217,17 @@ class QueryFormer(nn.Module):
         tree_attn_bias[:, :, 1:, 0] = tree_attn_bias[:, :, 1:, 0] + t
         tree_attn_bias[:, :, 0, :] = tree_attn_bias[:, :, 0, :] + t
         
-        x_view = x.view(-1, 1165)
+        # x_view = x.view(-1, 1165)
+        x_view = x.view(-1, 2623)
+        # Total Size = 2 (Type & Join IDs)
+        #    + 3 * 30 (Filters)
+        #    + 30 (Filter Mask)
+        #    + 30 * 50 (Histograms)
+        #    + 1 (Table ID)
+        #    + 1000 (Sample Data)
+        #    = 2 + 90 + 30 + 1500 + 1 + 1000
+        #    = 2623 elements
+
         node_feature = self.embbed_layer(x_view).view(n_batch,-1, self.hidden_dim)
         
         # -1 is number of dummy
