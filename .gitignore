@@ -1,1 +1,5 @@
 *.csv
+*.pt
+*.log
+*.pth
+*.pkl
