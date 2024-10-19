@@ -27,7 +27,7 @@ from model.dataset import PlanTreeDataset
 from model.trainer import eval_workload, train
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
 
 # Define schema
 imdb_schema = {
@@ -199,13 +199,13 @@ def extract_query_info_from_plan(json_plan, query_id, alias2t):
                     # Check if 'val' is a column name (contains '.')
                     if '.' in val:
                         # This is a join predicate, skip adding to predicates
-                        logging.warning(f"Predicate '{pred}' in query_id={query_id} could be a join condition. Skipping.")
+                        # logging.warning(f"Predicate '{pred}' in query_id={query_id} could be a join condition. Skipping.")
                         continue
                     if '.' not in col:
                         if alias:
                             table = alias2t.get(alias)
                             if not table:
-                                logging.warning(f"Alias '{alias}' not found in alias2t mapping. Skipping predicate '{pred}'.")
+                                # logging.warning(f"Alias '{alias}' not found in alias2t mapping. Skipping predicate '{pred}'.")
                                 continue
                             col = f"{table}.{col}"
                             logging.debug(f"Query_id={query_id}: Prefixed column '{col}' with table '{table}'.")
@@ -270,7 +270,7 @@ def generate_csv_for_samples(df, output_path, alias2t):
 
 # Generate CSV for queries based on train_df and val_df
 imdb_path = './data/imdb/'
-train_parts = [f"{imdb_path}plan_and_cost/train_plan_part{i}.csv" for i in range(2)]  # Example: parts 0 and 1
+train_parts = [f"{imdb_path}plan_and_cost/train_plan_part{i}.csv" for i in range(18)]  # Example: parts 0 and 1
 dfs = []
 for file in train_parts:
     if os.path.exists(file):
@@ -294,7 +294,7 @@ logging.info(f"Loaded training data with {len(full_train_df)} records.")
 logging.info(f"Loaded validation data with {len(val_df)} records.")
 
 combined_df = pd.concat([full_train_df, val_df], ignore_index=True) if not full_train_df.empty and not val_df.empty else pd.DataFrame()
-combined_df = combined_df.head(100)  # only fetch the first 100 queries for testing
+# combined_df = combined_df.head(100)  # only fetch the first 100 queries for testing
 generated_csv_path = './data/imdb/generated_queries.csv'
 
 # Generate CSV for queries based on train_df and val_df
@@ -421,7 +421,7 @@ methods = {
     'device': args.device,
     'bs': 512,
 }
-
+exit()
 # Evaluate on 'job-light' workload
 job_light_workload_file = './data/imdb/workloads/job-light.csv'
 if os.path.exists(job_light_workload_file):
