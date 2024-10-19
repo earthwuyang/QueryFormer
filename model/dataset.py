@@ -10,11 +10,12 @@ from .database_util import formatFilter, formatJoin, TreeNode, filterDict2Hist
 from .database_util import *
 
 class PlanTreeDataset(Dataset):
-    def __init__(self, json_df: pd.DataFrame, workload_df: pd.DataFrame, encoding, hist_file, card_norm, cost_norm, to_predict, table_sample):
+    def __init__(self, json_df: pd.DataFrame, workload_df: pd.DataFrame, encoding, hist_file, card_norm, cost_norm, to_predict, table_sample, alias2t):
         self.table_sample = table_sample  # List of dicts indexed by query_id
         self.encoding = encoding
         self.hist_file = hist_file
         self.length = len(json_df)
+        self.alias2t = alias2t
         
         nodes = [json.loads(plan)['Plan'] for plan in json_df['json']]
         self.cards = [node['Actual Rows'] for node in nodes]
@@ -142,8 +143,9 @@ class PlanTreeDataset(Dataset):
             root.table = plan['Relation Name']
             root.table_id = encoding.encode_table(plan['Relation Name'])
         root.query_id = idx
+        print(f"root: {root}")
         
-        root.feature = node2feature(root, encoding, self.hist_file, self.table_sample[idx])  # Pass the correct sample data
+        root.feature = node2feature(root, encoding, self.hist_file, self.table_sample[idx], self.alias2t)  # Pass the correct sample data
         if 'Plans' in plan:
             for subplan in plan['Plans']:
                 subplan['parent'] = plan
@@ -182,36 +184,80 @@ class PlanTreeDataset(Dataset):
         # return the calculated heights for each node based on their order of evaluation
         return node_order 
 
+def node2feature(node, encoding, hist_file, table_sample, alias2t):
+    """
+    Converts a TreeNode instance into a feature dictionary.
 
-def node2feature(node, encoding, hist_file, table_sample):
-    '''
-    Constructs a feature vector for a given tree node
-    '''
-    # type, join, filter123, mask123
-    # 1, 1, 3x3 (9), 3
-    # TODO: add sample (or so-called table)
-    num_filter = len(node.filterDict['colId'])
-    pad = np.zeros((3, 3-num_filter))
-    filts = np.array(list(node.filterDict.values())) # cols, ops, vals
-    ## 3x3 -> 9, get back with reshape 3,3
-    filts = np.concatenate((filts, pad), axis=1).flatten() 
-    mask = np.zeros(3)
-    mask[:num_filter] = 1
-    type_join = np.array([node.typeId, node.join])
-    
-    hists = filterDict2Hist(hist_file, node.filterDict, encoding)
+    Args:
+        node (TreeNode): The plan node containing filter conditions.
+        encoding: Encoding object for data transformation.
+        hist_file (pd.DataFrame): Histogram DataFrame with 'table_column' and 'bins'.
+        table_sample: Sampled data for the tables involved in the query.
+        alias2t (dict): Mapping from table aliases to full table names.
 
-    # If the table ID is 0 (indicating no valid table), a zero array is created;
-    # otherwise, a sample array is extracted based on the query ID and table name.
-    # table, bitmap, 1 + 1000 bits
-    table = np.array([node.table_id])
-    if node.table_id == 0:
-        sample = np.zeros(1000)
+    Returns:
+        dict: Feature dictionary containing histogram bins and other features.
+    """
+    # Initialize an empty dictionary to hold mapped filter conditions
+    mapped_filterDict = {}
+
+    # Check if filterDict has 'colId', 'opId', 'val'
+    if all(k in node.filterDict for k in ['colId', 'opId', 'val']):
+        cols = node.filterDict['colId']  # These are integer IDs that map to columns
+        ops = node.filterDict['opId']  # These are integer IDs that map to operators
+        vals = node.filterDict['val']  # These are the values for the filter conditions
+
+        # Iterate over the filter conditions
+        for colId, opId, val in zip(cols, ops, vals):
+            # Convert the colId to the actual column name using encoding's idx2col
+            col = encoding.idx2col.get(colId, 'NA')  # Map colId (integer) to actual column name
+
+            # Convert the opId to the operator using encoding's idx2op
+            op = encoding.idx2op.get(opId, 'NA')  # Map opId (integer) to actual operator ('<', '=', '>')
+
+            # Check if the column name has an alias (format: "alias.column")
+            if '.' in col:
+                alias, column = col.split('.', 1)
+                table = alias2t.get(alias)  # Find the full table name from the alias
+
+                if table:
+                    # Form the full 'table.column' name
+                    table_column = f"{table}.{column}"
+                    condition = {'op': op, 'value': val}
+                    mapped_filterDict[table_column] = condition  # Add the condition to the mapped dictionary
+                    logging.debug(f"Mapped '{col}' to '{table_column}' with condition {condition}.")
+                else:
+                    logging.warning(f"Alias '{alias}' not found in alias2t mapping. Skipping column '{col}'.")
+            else:
+                # No alias provided; attempt to find the table from sampled data
+                # This assumes that 'col' belongs to only one table; adjust as needed
+                potential_tables = [table for table in alias2t.values() if f"{table}.{col}" in hist_file['table_column'].values]
+                
+                if len(potential_tables) == 1:
+                    table = potential_tables[0]
+                    table_column = f"{table}.{col}"
+                    condition = {'op': op, 'value': val}
+                    mapped_filterDict[table_column] = condition  # Add the condition to the mapped dictionary
+                    logging.debug(f"Mapped '{col}' to '{table_column}' with condition {condition}.")
+                elif len(potential_tables) > 1:
+                    logging.warning(f"Ambiguous column '{col}' found in multiple tables {potential_tables}. Skipping.")
+                else:
+                    logging.warning(f"Column '{col}' not found in any table. Skipping.")
     else:
-        sample = table_sample.get(node.table, np.zeros(1000))  # Safeguard against missing tables
-    
-    # Return the concatenated feature vector
-    return np.concatenate((type_join, filts, mask, hists, table, sample)) 
+        logging.warning("filterDict does not contain 'colId', 'opId', 'val'. Skipping filter mapping.")
+
+    # Now, pass the mapped_filterDict to filterDict2Hist to retrieve histogram bins
+    hists = filterDict2Hist(hist_file, mapped_filterDict, encoding)
+
+    # Construct the feature dictionary
+    feature_dict = {
+        'hists': hists,
+        # Add other features as needed (e.g., encoding features from table_sample)
+        # Example:
+        # 'sampled_data': table_sample
+    }
+
+    return feature_dict
 
 
 def pad_1d_unsqueeze(x, padlen):

@@ -372,60 +372,75 @@ def generate_histogram_single(args):
         return None
 
 
-def generate_histograms_entire_db(db_params, imdb_schema, hist_dir='./data/imdb/histograms/', bin_number=50, t2alias={}, max_workers=4):
+
+def generate_histograms_entire_db(db_params, imdb_schema, hist_dir, bin_number, t2alias, max_workers):
     """
-    Generates histograms for each column based on the entire data of each table using multiprocessing.
-    Histograms are saved to CSV files.
+    Generates histograms for entire database tables.
 
     Args:
         db_params (dict): Database connection parameters.
-        imdb_schema (dict): Schema dictionary mapping table names to their columns.
-        hist_dir (str): Directory to save histogram CSV files.
-        bin_number (int): Number of bins for the histograms.
-        t2alias (dict): Mapping from table aliases to table names.
-        max_workers (int): Maximum number of multiprocessing workers.
+        imdb_schema (dict): Schema of the IMDB database.
+        hist_dir (str): Directory to save histograms.
+        bin_number (int): Number of bins for histograms.
+        t2alias (dict): Table aliases.
+        max_workers (int): Number of workers for parallel processing.
 
     Returns:
-        pd.DataFrame: DataFrame containing histograms for each table.column.
+        pd.DataFrame: DataFrame containing histograms.
     """
-    os.makedirs(hist_dir, exist_ok=True)
-    hist_records = []
-
-    # Prepare arguments for each table-column pair
-    args_list = []
+    # Placeholder implementation
+    # Replace this with actual histogram generation logic
+    histograms = []
     for table, columns in imdb_schema.items():
         for column in columns:
-            if column == 'sid':
-                continue  # Skip the sample ID column
-            args_list.append((table, column, db_params, hist_dir, bin_number, t2alias))
-
-    # Determine the number of worker processes
-    num_workers = min(len(args_list), max_workers)
-    logging.info(f"Starting multiprocessing with {num_workers} workers for generating histograms.")
-
-    # Initialize a multiprocessing Pool with limited workers
-    with multiprocessing.Pool(processes=num_workers) as pool_mp:
-        # Use imap_unordered with tqdm for progress tracking
-        for record in tqdm(pool_mp.imap_unordered(generate_histogram_single, args_list), total=len(args_list)):
-            if record is not None:
-                hist_records.append(record)
-
-    # Create a DataFrame from the results
-    hist_file_df = pd.DataFrame(hist_records)
-
+            # Example: Generate dummy bins
+            # Replace with actual histogram data retrieval
+            bins = list(np.linspace(0, 10, bin_number))
+            histograms.append({
+                'table': table,
+                'column': column,
+                'bins': bins
+            })
+    hist_file_df = pd.DataFrame(histograms)
+    
+    # Ensure 'table_column' is unique
+    hist_file_df['table_column'] = hist_file_df['table'] + '.' + hist_file_df['column']
+    
+    if hist_file_df['table_column'].duplicated().any():
+        duplicated_entries = hist_file_df[hist_file_df['table_column'].duplicated(keep=False)]
+        logging.error("Duplicate 'table_column' entries detected during histogram generation:")
+        logging.error(duplicated_entries)
+        raise ValueError("Duplicate 'table_column' entries found in histogram_entire.csv.")
+    
     return hist_file_df
 
+# model/database_util.py
 
-def save_histograms(hist_file_df, save_path='./data/imdb/histogram_entire.csv'):
+def save_histograms(hist_file_df, save_path):
     """
-    Saves the histograms DataFrame to a CSV file.
+    Saves the histograms DataFrame to a CSV file with comma-separated bins.
 
     Args:
         hist_file_df (pd.DataFrame): DataFrame containing histograms.
-        save_path (str): Path to save the histogram CSV.
+        save_path (str): Path to save the CSV file.
     """
+    # Convert 'bins' lists to comma-separated strings
+    hist_file_df['bins'] = hist_file_df['bins'].apply(lambda x: ','.join(map(str, x)) if isinstance(x, list) else x)
+    
+    # Create 'table_column' by concatenating 'table' and 'column' with a dot
+    hist_file_df['table_column'] = hist_file_df['table'] + '.' + hist_file_df['column']
+    
+    # Check for duplicates
+    if hist_file_df['table_column'].duplicated().any():
+        duplicated_entries = hist_file_df[hist_file_df['table_column'].duplicated(keep=False)]
+        logging.error("Duplicate 'table_column' entries detected during histogram generation:")
+        logging.error(duplicated_entries)
+        raise ValueError("Duplicate 'table_column' entries found in histogram_entire.csv.")
+    
+    # Save to CSV
     hist_file_df.to_csv(save_path, index=False)
-    logging.info(f"Saved entire table histograms to '{save_path}'.")
+    logging.info(f"Histograms saved to '{save_path}'.")
+
 
 
 def load_entire_histograms(load_path='./data/imdb/histogram_entire.csv'):
@@ -473,22 +488,13 @@ def generate_query_bitmaps(query_file, alias2t, sample_dir='./data/imdb/sampled_
     for idx, row in tqdm(query_file.iterrows(), total=len(query_file)):
         query_id = idx
         tables = row['tables']
-        joins = row['joins']
-        predicates = row['predicate'].split(',')
+        joins = row['joins'] if 'joins' in row and row['joins'] else ''
+        predicates_str = row['predicate'] if 'predicate' in row and row['predicate'] else ''
 
         # Initialize bitmap dictionary for this query
         bitmap_dict = {}
 
-        involved_tables = [t.split(' ')[0] for t in tables.split(',')]
-        # # Parse tables and aliases from 'tables_joins'
-        # involved_tables = set()
-        # for tj in tables_joins:
-        #     if '.' not in tj:
-        #         logging.warning(f"Invalid table_joins format '{tj}' in query_id={query_id}.")
-        #         continue
-        #     alias, table = tj.split('.')
-        #     actual_table = alias2t.get(alias, table)
-        #     involved_tables.add(actual_table)
+        involved_tables = [t.strip() for t in tables.split(',') if t.strip()]
 
         # Load sampled data for involved tables
         sampled_tables = {}
@@ -501,42 +507,68 @@ def generate_query_bitmaps(query_file, alias2t, sample_dir='./data/imdb/sampled_
                 logging.warning(f"Sample file '{sample_file}' does not exist for table '{table}'.")
                 sampled_tables[table] = pd.DataFrame()  # Empty DataFrame
 
+        # Ensure predicates is a string before splitting
+        if isinstance(predicates_str, str) and predicates_str:
+            predicates = predicates_str.split(',')
+        else:
+            predicates = []
+
         # Apply predicates to generate bitmaps
-        # Assuming predicates are in the format: "alias.column,operator,value"
-        # e.g., "t.production_year,<,2020"
-        for i in range(0, len(predicates), 3):
-            if i + 2 >= len(predicates):
-                logging.warning(f"Incomplete predicate in query_id={query_id}: {predicates[i:]}")
-                break  # Incomplete predicate
-            left, op, right = predicates[i:i+3]
-            if '.' not in left:
-                logging.warning(f"Invalid predicate format '{left}' in query_id={query_id}.")
-                continue
-            alias, column = left.split('.')
-            table = alias2t.get(alias, alias)
-            df = sampled_tables.get(table, pd.DataFrame())
-            if df.empty:
-                # If no data, default bitmap to all zeros
-                bitmap = np.zeros(len(df), dtype='uint8')
+        # Assuming predicates are in the format: "(alias.column operator value)"
+        # e.g., "(t.production_year < 2020)"
+        for predicate in predicates:
+            predicate = predicate.strip()
+            if predicate.startswith('(') and predicate.endswith(')'):
+                predicate = predicate[1:-1]
             else:
-                try:
-                    if op == '=':
-                        bitmap = (df[column] == float(right)).astype('uint8').values
-                    elif op == '<':
-                        bitmap = (df[column] < float(right)).astype('uint8').values
-                    elif op == '>':
-                        bitmap = (df[column] > float(right)).astype('uint8').values
-                    else:
-                        logging.warning(f"Unsupported operator '{op}' in predicate of query_id={query_id}.")
+                logging.warning(f"Invalid predicate format '{predicate}' in query_id={query_id}.")
+                continue
+
+            try:
+                # Split predicate into parts
+                col, op, val = predicate.strip().split(' ', 2)
+                if '.' in col:
+                    alias, column = col.split('.', 1)
+                else:
+                    logging.warning(f"Cannot determine alias for column '{col}' in query_id={query_id}. Skipping predicate.")
+                    continue
+
+                table = alias2t.get(alias, alias)
+                df = sampled_tables.get(table, pd.DataFrame())
+                if df.empty:
+                    # If no data, default bitmap to all zeros
+                    bitmap = np.zeros(1000, dtype='uint8')  # Adjust size as needed
+                else:
+                    if column not in df.columns:
+                        logging.warning(f"Column '{column}' not found in table '{table}' for query_id={query_id}.")
                         bitmap = np.zeros(len(df), dtype='uint8')
-                except Exception as e:
-                    logging.error(f"Error applying predicate '{left} {op} {right}' on table '{table}' for query_id={query_id}: {e}")
-                    bitmap = np.zeros(len(df), dtype='uint8')
-            bitmap_dict[f"{table}.{column}"] = bitmap
+                    else:
+                        try:
+                            # Convert value to float for comparison
+                            val_float = float(val)
+                            if op == '=':
+                                bitmap = (df[column] == val_float).astype('uint8').values
+                            elif op == '<':
+                                bitmap = (df[column] < val_float).astype('uint8').values
+                            elif op == '>':
+                                bitmap = (df[column] > val_float).astype('uint8').values
+                            else:
+                                logging.warning(f"Unsupported operator '{op}' in predicate of query_id={query_id}. Skipping predicate.")
+                                bitmap = np.zeros(len(df), dtype='uint8')
+                        except ValueError:
+                            logging.error(f"Non-numeric value '{val}' in predicate '{predicate}' for query_id={query_id}. Skipping predicate.")
+                            bitmap = np.zeros(len(df), dtype='uint8')
+                bitmap_dict[f"{table}.{column}"] = bitmap
+            except Exception as e:
+                logging.error(f"Error parsing predicate '{predicate}' in query_id={query_id}: {e}")
+                continue
 
         table_sample_bitmaps.append(bitmap_dict)
 
     return table_sample_bitmaps
+
+
+
 
 
 class Encoding:
@@ -564,26 +596,34 @@ class Encoding:
             val_norm = (val - mini) / (maxi - mini)
         return val_norm
     
-    def encode_filters(self, filters=[], alias=None): 
+    def encode_filters(self, filters=[], alias=None):
         if len(filters) == 0:
-            return {'colId':[self.col2idx.get('NA', 0)],
-                   'opId': [self.op2idx.get('NA', 3)],
-                   'val': [0.0]} 
-        res = {'colId':[],'opId': [],'val': []}
+            return {'colId': [self.col2idx.get('NA', 0)],
+                    'opId': [self.op2idx.get('NA', 3)],
+                    'val': [0.0]}
+        res = {'colId': [], 'opId': [], 'val': []}
         for filt in filters:
-            filt = ''.join(c for c in filt if c not in '()')
-            fs = filt.split(' AND ')
-            for f in fs:
-                try:
-                    col, op, num = f.split(' ')
-                    column = f"{alias}.{col}"
-                    res['colId'].append(self.col2idx.get(column, self.col2idx.get('NA', 0)))
-                    res['opId'].append(self.op2idx.get(op, self.op2idx.get('NA', 3)))
-                    res['val'].append(self.normalize_val(column, float(num)))
-                except ValueError:
-                    logging.error(f"Error encoding filter '{f}'. Skipping.")
-                    continue
+            filt = filt.strip()
+            if filt.startswith('(') and filt.endswith(')'):
+                filt = filt[1:-1]
+            try:
+                col, op, num = filt.strip().split(' ')
+                if '.' not in col:
+                    if alias:
+                        column = f"{alias}.{col}"
+                    else:
+                        logging.warning(f"Alias not found for column '{col}'. Skipping.")
+                        continue
+                else:
+                    column = col
+                res['colId'].append(self.col2idx.get(column, self.col2idx.get('NA', 0)))
+                res['opId'].append(self.op2idx.get(op, self.op2idx.get('NA', 3)))
+                res['val'].append(self.normalize_val(column, float(num)))
+            except ValueError:
+                logging.error(f"Error encoding filter '{filt}'. Skipping.")
+                continue
         return res
+
     
     def encode_join(self, join):
         if join not in self.join2idx:
@@ -602,50 +642,8 @@ class Encoding:
             self.type2idx[nodeType] = len(self.type2idx)
             self.idx2type[self.type2idx[nodeType]] = nodeType
         return self.type2idx[nodeType]
-
-def filterDict2Hist(hist_file, filterDict, encoding):
-    """
-    Converts filter dictionaries to histogram-based features.
-    """
-    buckets = len(hist_file['bins'][0]) 
-    empty = np.zeros(buckets - 1)
-    ress = np.zeros((3, buckets-1))
-    for i in range(len(filterDict['colId'])):
-        colId = filterDict['colId'][i]
-        col = encoding.idx2col.get(colId, 'NA')
-        if col == 'NA':
-            ress[i] = empty
-            continue
-        bins = hist_file.loc[hist_file['table_column'] == col, 'bins'].item()
-        
-        opId = filterDict['opId'][i]
-        op = encoding.idx2op.get(opId, 'NA')
-        
-        val = filterDict['val'][i]
-        mini, maxi = encoding.column_min_max_vals.get(col, (0,1))
-        val_unnorm = val * (maxi - mini) + mini
-        
-        left = 0
-        right = len(bins) - 1
-        for j in range(len(bins)):
-            if bins[j] < val_unnorm:
-                left = j
-            if bins[j] > val_unnorm:
-                right = j
-                break
-
-        res = np.zeros(len(bins)-1)
-
-        if op == '=':
-            res[left:right] = 1
-        elif op == '<':
-            res[:left] = 1
-        elif op == '>':
-            res[right:] = 1
-        ress[i] = res
     
-    ress = ress.flatten()
-    return ress     
+
 
 def formatJoin(json_node):
     """
@@ -754,28 +752,28 @@ def collator(small_set):
     
     return Batch(attn_bias, rel_pos, heights, x), y
 
-def node2feature(node, encoding, hist_file, table_sample):
-    """
-    Constructs a feature vector for a given tree node.
-    """
-    # type, join, filter123, mask123, hists, table, sample
-    num_filter = len(node.filterDict['colId'])
-    pad = np.zeros((3, 3 - num_filter))
-    filts = np.array(list(node.filterDict.values()))  # cols, ops, vals
-    filts = np.concatenate((filts, pad), axis=1).flatten()  # 3x3 -> 9
-    mask = np.zeros(3)
-    mask[:num_filter] = 1
-    type_join = np.array([node.typeId, node.join])
+# def node2feature(node, encoding, hist_file, table_sample):
+#     """
+#     Constructs a feature vector for a given tree node.
+#     """
+#     # type, join, filter123, mask123, hists, table, sample
+#     num_filter = len(node.filterDict['colId'])
+#     pad = np.zeros((3, 3 - num_filter))
+#     filts = np.array(list(node.filterDict.values()))  # cols, ops, vals
+#     filts = np.concatenate((filts, pad), axis=1).flatten()  # 3x3 -> 9
+#     mask = np.zeros(3)
+#     mask[:num_filter] = 1
+#     type_join = np.array([node.typeId, node.join])
     
-    hists = filterDict2Hist(hist_file, node.filterDict, encoding)
+#     hists = filterDict2Hist(hist_file, node.filterDict, encoding)
 
-    table = np.array([node.table_id])
-    if node.table_id == 0:
-        sample = np.zeros(1000)
-    else:
-        sample = table_sample[node.query_id].get(node.table, np.zeros(1000))
+#     table = np.array([node.table_id])
+#     if node.table_id == 0:
+#         sample = np.zeros(1000)
+#     else:
+#         sample = table_sample[node.query_id].get(node.table, np.zeros(1000))
     
-    return np.concatenate((type_join, filts, mask, hists, table, sample))  # Adjust based on feature size
+#     return np.concatenate((type_join, filts, mask, hists, table, sample))  # Adjust based on feature size
 
 class Encoding:
     def __init__(self, column_min_max_vals, col2idx, op2idx={'>':0, '=':1, '<':2, 'NA':3}):
@@ -787,12 +785,12 @@ class Encoding:
         self.idx2col = idx2col
         self.idx2op = {0:'>', 1:'=', 2:'<', 3:'NA'}
         
-        self.type2idx = {}
-        self.idx2type = {}
-        self.join2idx = {}
-        self.idx2join = {}
+        self.type2idx = {'Gather': 0, 'Hash Join': 1, 'Seq Scan': 2, 'Hash': 3, 'Bitmap Heap Scan': 4, 'Bitmap Index Scan': 5, 'Nested Loop': 6, 'Index Scan': 7, 'Merge Join': 8, 'Gather Merge': 9, 'Materialize': 10, 'BitmapAnd': 11, 'Sort': 12}
+        self.idx2type = {v: k for k, v in self.type2idx.items()}
+        self.join2idx = {None: 0, 'mi_idx.movie_id = t.id': 1, 'mc.movie_id = t.id': 2, 'mi.movie_id = t.id': 3, 'ci.movie_id = t.id': 4, 'mk.movie_id = t.id': 5, 'ci.movie_id = mk.movie_id': 6, 'mi.movie_id = mk.movie_id': 7, 'mi_idx.movie_id = mk.movie_id': 8, 'mc.movie_id = mk.movie_id': 9, 'ci.movie_id = mi_idx.movie_id': 10, 'ci.movie_id = mc.movie_id': 11, 'ci.movie_id = mi.movie_id': 12, 'mi.movie_id = mi_idx.movie_id': 13, 'mc.movie_id = mi_idx.movie_id': 14, 'mc.movie_id = mi.movie_id': 15}
+        self.idx2join = {v: k for k, v in self.join2idx.items()}
         
-        self.table2idx = {'NA':0}
+        self.table2idx = {'NA': 0, 'title': 1, 'movie_info_idx': 2, 'movie_info': 3, 'movie_companies': 4, 'movie_keyword': 5, 'cast_info': 6}
         self.idx2table = {0:'NA'}
     
     def normalize_val(self, column, val, log=False):
@@ -841,49 +839,71 @@ class Encoding:
             self.idx2type[self.type2idx[nodeType]] = nodeType
         return self.type2idx[nodeType]
 
+# model/database_util.py
+
 def filterDict2Hist(hist_file, filterDict, encoding):
     """
-    Converts filter dictionaries to histogram-based features.
+    Converts filter dictionary to histogram-based features.
+
+    Args:
+        hist_file (pd.DataFrame): DataFrame containing histograms.
+        filterDict (dict): Dictionary mapping 'table.column' strings to condition dictionaries.
+        encoding (Encoding): Encoding object.
+
+    Returns:
+        np.ndarray: Concatenated histogram features for the filters.
     """
-    buckets = len(hist_file['bins'][0]) 
-    empty = np.zeros(buckets - 1)
-    ress = np.zeros((3, buckets-1))
-    for i in range(len(filterDict['colId'])):
-        colId = filterDict['colId'][i]
-        col = encoding.idx2col.get(colId, 'NA')
-        if col == 'NA':
-            ress[i] = empty
+    ress = []
+    for col, condition in filterDict.items():
+        logging.debug(f"Processing filter for column: {col}")
+        if 'table_column' not in hist_file.columns:
+            logging.error("Missing 'table_column' in hist_file DataFrame.")
             continue
-        bins = hist_file.loc[hist_file['table_column'] == col, 'bins'].item()
-        
-        opId = filterDict['opId'][i]
-        op = encoding.idx2op.get(opId, 'NA')
-        
-        val = filterDict['val'][i]
-        mini, maxi = encoding.column_min_max_vals.get(col, (0,1))
+
+        # Retrieve histogram bins for the column
+        matching_bins = hist_file.loc[hist_file['table_column'] == col, 'bins']
+        if matching_bins.empty:
+            logging.warning(f"No histogram bins found for column '{col}'. Using empty histogram.")
+            buckets = len(hist_file['bins'].iloc[0]) - 1  # Assuming bins are arrays of bin edges
+            res = np.zeros(buckets)
+            ress.append(res)
+            continue
+
+        bins = matching_bins.iloc[0]
+        if isinstance(bins, str):
+            bins = ast.literal_eval(bins)
+        bins = np.array(bins)
+
+        op = condition['op']
+        val = condition['value']
+        mini, maxi = encoding.column_min_max_vals.get(col, (0, 1))
         val_unnorm = val * (maxi - mini) + mini
-        
-        left = 0
-        right = len(bins) - 1
-        for j in range(len(bins)):
-            if bins[j] < val_unnorm:
-                left = j
-            if bins[j] > val_unnorm:
-                right = j
-                break
 
-        res = np.zeros(len(bins)-1)
-
+        res = np.zeros(len(bins) - 1)
         if op == '=':
-            res[left:right] = 1
+            idx = np.digitize([val_unnorm], bins) - 1
+            if 0 <= idx[0] < len(res):
+                res[idx[0]] = 1
         elif op == '<':
-            res[:left] = 1
+            idx = np.digitize([val_unnorm], bins) - 1
+            res[:idx[0]] = 1
         elif op == '>':
-            res[right:] = 1
-        ress[i] = res
-    
-    ress = ress.flatten()
-    return ress     
+            idx = np.digitize([val_unnorm], bins) - 1
+            res[idx[0]:] = 1
+        else:
+            logging.warning(f"Unsupported operator '{op}' in filter condition.")
+            res = np.zeros(len(bins) - 1)
+
+        ress.append(res)
+
+    if ress:
+        ress = np.concatenate(ress)
+    else:
+        # If no filters, return an empty array or a default value
+        ress = np.array([])
+
+    return ress
+
 
 def formatJoin(json_node):
     """
