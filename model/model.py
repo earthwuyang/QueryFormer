@@ -6,6 +6,8 @@ import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+
 class Prediction(nn.Module):
     def __init__(self, in_feature = 69, hid_units = 256, contract = 1, mid_layers = True, res_con = True):
         super(Prediction, self).__init__()

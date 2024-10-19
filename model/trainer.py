@@ -10,6 +10,8 @@ import torch
 from scipy.stats import pearsonr
 import logging
 
+from model.dataset import collator
+
 def chunks(l, n):
     """Yield successive n-sized chunks from l."""
     for i in range(0, len(l), n):

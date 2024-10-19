@@ -752,28 +752,6 @@ def collator(small_set):
     
     return Batch(attn_bias, rel_pos, heights, x), y
 
-# def node2feature(node, encoding, hist_file, table_sample):
-#     """
-#     Constructs a feature vector for a given tree node.
-#     """
-#     # type, join, filter123, mask123, hists, table, sample
-#     num_filter = len(node.filterDict['colId'])
-#     pad = np.zeros((3, 3 - num_filter))
-#     filts = np.array(list(node.filterDict.values()))  # cols, ops, vals
-#     filts = np.concatenate((filts, pad), axis=1).flatten()  # 3x3 -> 9
-#     mask = np.zeros(3)
-#     mask[:num_filter] = 1
-#     type_join = np.array([node.typeId, node.join])
-    
-#     hists = filterDict2Hist(hist_file, node.filterDict, encoding)
-
-#     table = np.array([node.table_id])
-#     if node.table_id == 0:
-#         sample = np.zeros(1000)
-#     else:
-#         sample = table_sample[node.query_id].get(node.table, np.zeros(1000))
-    
-#     return np.concatenate((type_join, filts, mask, hists, table, sample))  # Adjust based on feature size
 
 class Encoding:
     def __init__(self, column_min_max_vals, col2idx, op2idx={'>':0, '=':1, '<':2, 'NA':3}):
@@ -839,23 +817,19 @@ class Encoding:
             self.idx2type[self.type2idx[nodeType]] = nodeType
         return self.type2idx[nodeType]
 
-# model/database_util.py
+HIST_BINS = 50  # Number of bins in each histogram
+MAX_FILTERS = 3  # Maximum number of filters to consider
+SAMPLE_SIZE = 1000  # Size of the sample data
 
-def filterDict2Hist(hist_file, filterDict, encoding):
-    """
-    Converts filter dictionary to histogram-based features.
-
-    Args:
-        hist_file (pd.DataFrame): DataFrame containing histograms.
-        filterDict (dict): Dictionary mapping 'table.column' strings to condition dictionaries.
-        encoding (Encoding): Encoding object.
-
-    Returns:
-        np.ndarray: Concatenated histogram features for the filters.
-    """
+def filterDict2Hist(hist_file, filterDict, encoding, hist_bins=HIST_BINS, max_filters=MAX_FILTERS):
     ress = []
+    filter_count = 0
     for col, condition in filterDict.items():
-        logging.debug(f"Processing filter for column: {col}")
+        if filter_count >= max_filters:
+            break  # Only consider up to max_filters filters
+        filter_count += 1
+
+        # logging.debug(f"Processing filter for column: {col}")
         if 'table_column' not in hist_file.columns:
             logging.error("Missing 'table_column' in hist_file DataFrame.")
             continue
@@ -863,23 +837,23 @@ def filterDict2Hist(hist_file, filterDict, encoding):
         # Retrieve histogram bins for the column
         matching_bins = hist_file.loc[hist_file['table_column'] == col, 'bins']
         if matching_bins.empty:
-            logging.warning(f"No histogram bins found for column '{col}'. Using empty histogram.")
-            buckets = len(hist_file['bins'].iloc[0]) - 1  # Assuming bins are arrays of bin edges
-            res = np.zeros(buckets)
-            ress.append(res)
-            continue
-
-        bins = matching_bins.iloc[0]
-        if isinstance(bins, str):
-            bins = ast.literal_eval(bins)
-        bins = np.array(bins)
+            logging.warning(f"No histogram bins found for column '{col}'. Using default bins.")
+            bins = np.linspace(0, 1, hist_bins + 1)  # Default bins
+        else:
+            bins = matching_bins.iloc[0]
+            if isinstance(bins, str):
+                bins = ast.literal_eval(bins)
+            bins = np.array(bins)
+            # Ensure bins have the correct size
+            if len(bins) != hist_bins + 1:
+                bins = np.linspace(bins[0], bins[-1], hist_bins + 1)
 
         op = condition['op']
         val = condition['value']
         mini, maxi = encoding.column_min_max_vals.get(col, (0, 1))
         val_unnorm = val * (maxi - mini) + mini
 
-        res = np.zeros(len(bins) - 1)
+        res = np.zeros(hist_bins)
         if op == '=':
             idx = np.digitize([val_unnorm], bins) - 1
             if 0 <= idx[0] < len(res):
@@ -892,15 +866,18 @@ def filterDict2Hist(hist_file, filterDict, encoding):
             res[idx[0]:] = 1
         else:
             logging.warning(f"Unsupported operator '{op}' in filter condition.")
-            res = np.zeros(len(bins) - 1)
+            res = np.zeros(hist_bins)
 
         ress.append(res)
 
-    if ress:
-        ress = np.concatenate(ress)
-    else:
-        # If no filters, return an empty array or a default value
-        ress = np.array([])
+    # Pad or truncate the ress list to have max_filters entries
+    while len(ress) < max_filters:
+        ress.append(np.zeros(hist_bins))
+
+    ress = ress[:max_filters]  # Ensure only max_filters histograms are considered
+
+    # Concatenate the histograms
+    ress = np.concatenate(ress) if ress else np.zeros(hist_bins * max_filters)
 
     return ress
 

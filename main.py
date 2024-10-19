@@ -63,7 +63,7 @@ col2idx = {
 
 # Define Args
 class Args:
-    bs = 128
+    bs = 4
     lr = 0.001
     epochs = 100
     clip_size = 50
@@ -74,7 +74,8 @@ class Args:
     n_layers = 8
     dropout = 0.1
     sch_decay = 0.6
-    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    # device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    device = 'cpu'
     newpath = './results/full/cost/'
     to_predict = 'cost'
     max_workers = 10  # Limit the number of multiprocessing workers
@@ -293,6 +294,7 @@ logging.info(f"Loaded training data with {len(full_train_df)} records.")
 logging.info(f"Loaded validation data with {len(val_df)} records.")
 
 combined_df = pd.concat([full_train_df, val_df], ignore_index=True) if not full_train_df.empty and not val_df.empty else pd.DataFrame()
+combined_df = combined_df.head(100)  # only fetch the first 100 queries for testing
 generated_csv_path = './data/imdb/generated_queries.csv'
 
 # Generate CSV for queries based on train_df and val_df
@@ -317,18 +319,20 @@ try:
         na_values=['']           # Treat empty strings as empty, not NaN
     )
     # only fetch the first 100 queries for testing
-    query_file = query_file.head(100)
+    # query_file = query_file.head(100)
 except pd.errors.ParserError as e:
     logging.error(f"Error reading generated_queries.csv: {e}")
     exit(1)
 
 # Generate bitmaps for each query based on pre-sampled table data
 logging.info("Generating table sample bitmaps for each query.")
+
 sampled_data = generate_query_bitmaps(
     query_file=query_file,
     alias2t=alias2t,
     sample_dir=sample_dir
 )
+
 logging.info("Completed generating table sample bitmaps for all queries.")
 
 # Generate histograms based on entire tables
@@ -357,7 +361,7 @@ seed_everything()
 
 # Initialize PlanTreeDataset
 train_ds = PlanTreeDataset(
-    json_df=full_train_df,
+    json_df=combined_df,
     workload_df=None,  # Assuming workload_df is not needed for training
     encoding=encoding,
     hist_file=hist_file_df,
@@ -369,7 +373,7 @@ train_ds = PlanTreeDataset(
 )
 
 val_ds = PlanTreeDataset(
-    json_df=val_df,
+    json_df=combined_df,
     workload_df=None,  # Assuming workload_df is not needed for validation
     encoding=encoding,
     hist_file=hist_file_df,
