@@ -7,34 +7,13 @@ import os
 import time
 import torch
 from scipy.stats import pearsonr
+from .metrics import compute_metrics
 
 def chunks(l, n):
     """Yield successive n-sized chunks from l."""
     for i in range(0, len(l), n):
         yield l[i:i + n]
 
-def print_qerror(preds_unnorm, labels_unnorm, prints=False):
-    qerror = []
-    for i in range(len(preds_unnorm)):
-        if preds_unnorm[i] > float(labels_unnorm[i]):
-            qerror.append(preds_unnorm[i] / float(labels_unnorm[i]))
-        else:
-            qerror.append(float(labels_unnorm[i]) / float(preds_unnorm[i]))
-
-    e_50, e_90 = np.median(qerror), np.percentile(qerror,90)    
-    e_mean = np.mean(qerror)
-
-    if prints:
-        print("Median: {}".format(e_50))
-        print("Mean: {}".format(e_mean))
-
-    res = {
-        'q_median' : e_50,
-        'q_90' : e_90,
-        'q_mean' : e_mean,
-    }
-
-    return res
 
 def get_corr(ps, ls): # unnormalised
     ps = np.array(ps)
@@ -75,14 +54,17 @@ def evaluate(model, ds, bs, norm, device, prints=False):
             cost_preds = cost_preds.squeeze()
 
             cost_predss = np.append(cost_predss, cost_preds.cpu().detach().numpy())
-    scores = print_qerror(norm.unnormalize_labels(cost_predss), ds.costs, prints)
-    corr = get_corr(norm.unnormalize_labels(cost_predss), ds.costs)
-    if prints:
-        print('Corr: ',corr)
-    return scores, corr
+    cost_unnorm = norm.inverse_transform(np.array(cost_predss).reshape(-1,1)).flatten()
+    label_unnorm = norm.inverse_transform(np.array(ds.labels).reshape(-1,1)).flatten()
+    res = compute_metrics(label_unnorm, cost_unnorm)
+    print(res)
+    # corr = get_corr(norm.inverse_transform(np.array(cost_predss).reshape(-1,1)).flatten(), ds.labels)
+    # if prints:
+    #     print('Corr: ',corr)
+    return res, None
 
-def train(model, train_ds, val_ds, crit, \
-    cost_norm, args, optimizer=None, scheduler=None):
+def train(model, train_ds, val_ds, test_ds, crit, \
+    mem_scaler, args, optimizer=None, scheduler=None):
     
     to_pred, bs, device, epochs, clip_size = \
         args.to_predict, args.bs, args.device, args.epochs, args.clip_size
@@ -100,59 +82,68 @@ def train(model, train_ds, val_ds, crit, \
 
     best_prev = 999999
 
+    skip_train = True
+    if not skip_train:
+        for epoch in range(epochs):
+            losses = 0
+            cost_predss = np.empty(0)
 
-    for epoch in range(epochs):
-        losses = 0
-        cost_predss = np.empty(0)
+            model.train()
 
-        model.train()
+            train_idxs = rng.permutation(len(train_ds))
 
-        train_idxs = rng.permutation(len(train_ds))
-
-        cost_labelss = np.array(train_ds.costs)[train_idxs]
+            cost_labelss = np.array(train_ds.labels)[train_idxs]
 
 
-        for idxs in chunks(train_idxs, bs):
-            optimizer.zero_grad()
+            for idxs in chunks(train_idxs, bs):
+                optimizer.zero_grad()
 
-            batch, batch_labels = collator(list(zip(*[train_ds[j] for j in idxs])))
-            
-            l, r = zip(*(batch_labels))
+                batch, batch_labels = collator(list(zip(*[train_ds[j] for j in idxs])))
+                
 
-            batch_cost_label = torch.FloatTensor(l).to(device)
-            batch = batch.to(device)
+                batch_cost_label = torch.FloatTensor(batch_labels).to(device)
+                batch = batch.to(device)
 
-            cost_preds, _ = model(batch)
-            cost_preds = cost_preds.squeeze()
+                cost_preds, _ = model(batch)
+                # print(f"cost_preds: {cost_preds},")
+                # print(f"batch_cost_label: {batch_cost_label},")
+                cost_preds = cost_preds.squeeze()
 
-            loss = crit(cost_preds, batch_cost_label)
+                loss = crit(cost_preds, batch_cost_label)
 
-            loss.backward()
+                loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_size)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_size)
 
-            optimizer.step()
-            # SQ: added the following 3 lines to fix the out of memory issue
-            del batch
-            del batch_labels
-            torch.cuda.empty_cache()
+                optimizer.step()
+                # SQ: added the following 3 lines to fix the out of memory issue
+                del batch
+                del batch_labels
+                torch.cuda.empty_cache()
 
-            losses += loss.item()
-            cost_predss = np.append(cost_predss, cost_preds.detach().cpu().numpy())
+                losses += loss.item()
+                cost_predss = np.append(cost_predss, cost_preds.detach().cpu().numpy())
 
-        if epoch > 40:
-            test_scores, corrs = evaluate(model, val_ds, bs, cost_norm, device, False)
+            if epoch > 40:
+                test_scores, corrs = evaluate(model, val_ds, bs, mem_scaler, device, False)
 
-            if test_scores['q_mean'] < best_prev: ## mean mse
-                best_model_path = logging(args, epoch, test_scores, filename = 'log.txt', save_model = True, model = model)
-                best_prev = test_scores['q_mean']
+                if test_scores['qerror_50 (Median)'] < best_prev: ## mean mse
+                    best_model_path = logging(args, epoch, test_scores, filename = 'log.txt', save_model = True, model = model)
+                    best_prev = test_scores['qerror_50 (Median)']
 
-        if epoch % 20 == 0:
-            print('Epoch: {}  Avg Loss: {}, Time: {}'.format(epoch,losses/len(train_ds), time.time()-t0))
-            train_scores = print_qerror(cost_norm.unnormalize_labels(cost_predss),cost_labelss, True)
+            if epoch % 1 == 0:
+                print('Epoch: {}  Avg Loss: {}, Time: {}'.format(epoch,losses/len(train_ds), time.time()-t0))
+                cost_unnorm = mem_scaler.inverse_transform(np.array(cost_predss).reshape(-1,1)).flatten()
+                label_unnorm = mem_scaler.inverse_transform(np.array(cost_labelss).reshape(-1,1)).flatten()
+                res = compute_metrics(label_unnorm, cost_unnorm)
+                print(res)
 
-        scheduler.step()   
+            scheduler.step()   
 
+    print(f"test on test set:")
+    best_model_path = '-4677096019385286629.pt'
+    model.load_state_dict(torch.load(os.path.join(args.newpath, best_model_path))['model'])
+    test_scores, corrs = evaluate(model, test_ds, bs, mem_scaler, device, True)
     return model, best_model_path
 
 

@@ -5,44 +5,203 @@ import json
 import pandas as pd
 import sys, os
 from collections import deque
+from tqdm import tqdm
 from .database_util import formatFilter, formatJoin, TreeNode, filterDict2Hist
 from .database_util import *
 
-class PlanTreeDataset(Dataset):
-    def __init__(self, json_df : pd.DataFrame, train : pd.DataFrame, encoding, hist_file, card_norm, cost_norm, to_predict, table_sample):
+import sqlparse
+from sqlparse.sql import Comparison, Where
+from sqlparse.tokens import Keyword, DML
+import re
+import pickle
 
+def is_number(value):
+    """
+    Check if the given value is a number.
+    
+    Args:
+        value (str): The value to check.
+        
+    Returns:
+        bool: True if value is a number, False otherwise.
+    """
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
+
+def extract_numeric_predicates(sql_query):
+    """
+    Extract predicates from the SQL WHERE clause where the right side of the operator is a number.
+    
+    Args:
+        sql_query (str): The SQL query string.
+        
+    Returns:
+        list: A list of numeric predicates as strings.
+    """
+    # Parse the SQL query
+    parsed = sqlparse.parse(sql_query)
+    if not parsed:
+        return []
+    
+    stmt = parsed[0]
+    numeric_predicates = []
+
+    def extract_from_tokens(tokens):
+        """
+        Recursively traverse tokens to find numeric comparisons.
+        
+        Args:
+            tokens (list): List of sqlparse tokens.
+        """
+        for token in tokens:
+            if isinstance(token, Comparison):
+                # Extract the comparison string
+                comparison = str(token).strip()
+                
+                # Regex to split the comparison into left, operator, and right
+                match = re.match(r'(.+?)(=|<>|<=|>=|<|>)(.+)', comparison)
+                if match:
+                    left, operator, right = match.groups()
+                    left = left.strip()
+                    operator = operator.strip()
+                    right = right.strip()
+                    
+                    # Remove surrounding quotes from strings
+                    if right.startswith("'") and right.endswith("'"):
+                        continue  # It's a string predicate; skip
+                    if right.startswith('"') and right.endswith('"'):
+                        continue  # It's a string predicate; skip
+                    
+                    # Check if the right side is a number
+                    if is_number(right):
+                        numeric_predicates.append(comparison)
+            elif token.is_group:
+                # Recursively handle sub-tokens
+                extract_from_tokens(token.tokens)
+
+    # Iterate through the tokens to find the WHERE clause
+    for token in stmt.tokens:
+        if isinstance(token, Where):
+            extract_from_tokens(token.tokens)
+            break  # Assuming only one WHERE clause
+
+    return numeric_predicates
+
+
+class PlanTreeDataset(Dataset):
+    def __init__(self, plans : pd.DataFrame, train : pd.DataFrame, encoding, hist_file, mem_scaler, to_predict, mode, column_type, db_params):
+        table_sample = self.get_table_sample(mode, column_type, db_params)
         self.table_sample = table_sample
         self.encoding = encoding
         self.hist_file = hist_file
         
-        self.length = len(json_df)
+        self.length = len(plans)
         # train = train.loc[json_df['id']]
         
-        nodes = [json.loads(plan)['Plan'] for plan in json_df['json']]
-        self.cards = [node['Actual Rows'] for node in nodes]
-        self.costs = [json.loads(plan)['Execution Time'] for plan in json_df['json']]
+        nodes = [plan['Plan'] for plan in plans]
+        self.labels = [plan['peakmem'] for plan in plans]
+        # print(f"self.labels: {self.labels}")
+        # print(f"mem_scaler.center_: {mem_scaler.center_}")
+        # print(f"mem_scaler.scale_: {mem_scaler.scale_}")
+        # self.labels = torch.from_numpy(mem_scaler.normalize_labels(np.array(self.labels)))
+        self.labels = mem_scaler.transform(np.array(self.labels).reshape(-1,1)).flatten()
+        # print(f"self.labels: {self.labels}")
         
-        self.card_labels = torch.from_numpy(card_norm.normalize_labels(self.cards))
-        self.cost_labels = torch.from_numpy(cost_norm.normalize_labels(self.costs))
+        # self.card_labels = torch.from_numpy(card_norm.normalize_labels(self.cards))
+        # self.cost_labels = torch.from_numpy(cost_norm.normalize_labels(self.costs))
         
-        self.to_predict = to_predict
-        if to_predict == 'cost':
-            self.gts = self.costs
-            self.labels = self.cost_labels
-        elif to_predict == 'card':
-            self.gts = self.cards
-            self.labels = self.card_labels
-        elif to_predict == 'both': ## try not to use, just in case
-            self.gts = self.costs
-            self.labels = self.cost_labels
-        else:
-            raise Exception('Unknown to_predict type')
+        # self.to_predict = to_predict
+        # if to_predict == 'cost':
+        #     self.gts = self.costs
+        #     self.labels = self.cost_labels
+        # elif to_predict == 'card':
+        #     self.gts = self.cards
+        #     self.labels = self.card_labels
+        # elif to_predict == 'both': ## try not to use, just in case
+        #     self.gts = self.costs
+        #     self.labels = self.cost_labels
+        # else:
+        #     raise Exception('Unknown to_predict type')
             
-        idxs = list(json_df['id'])
+        idxs = np.arange(len(nodes)).tolist()
         
     
         self.treeNodes = [] ## for mem collection
-        self.collated_dicts = [self.js_node2dict(i,node) for i,node in zip(idxs, nodes)]
+        # load collated_dicts from file if exists
+        collated_dicts_file = os.path.join('data/tpcds_sf1', f'{mode}_collated_dicts.pkl')
+        if os.path.exists(collated_dicts_file):
+            with open(collated_dicts_file, 'rb') as f:
+                self.collated_dicts = pickle.load(f)
+            print('Loaded collated_dicts from file.')
+        else:
+            self.collated_dicts = [self.js_node2dict(i,node) for i,node in tqdm(zip(idxs, nodes), total = len(nodes), desc=mode)]
+            # Save collated_dicts to file
+            with open(collated_dicts_file, 'wb') as f:
+                pickle.dump(self.collated_dicts, f)
+                print('Saved collated_dicts to file.')
+
+    def get_table_sample(self, mode, column_type, db_params):
+        db_params_copy = db_params.copy()
+        db_params_copy['database'] = 'tpcds_sample'
+        import psycopg2
+        conn = psycopg2.connect(**db_params_copy)
+        cur = conn.cursor()
+
+        data_dir = '/home/wuy/DB/pg_mem_data'
+        tmp_data_dir = 'data/tpcds_sf1'
+        dataset = 'tpcds_sf1'
+        # load table_sample from file if exists
+        table_sample_file = os.path.join(tmp_data_dir, f'{mode}_table_samples.pkl')
+        if os.path.exists(table_sample_file):
+            with open(table_sample_file, 'rb') as f:
+                table_samples = pickle.load(f)
+            print('Loaded table_samples from file.')
+        else:
+            with open(os.path.join(data_dir, dataset, f'{mode}_plans.json')) as f:
+                plans = json.load(f)
+
+            table_pattern = r'\"([a-zA-Z_]+)\"\.'
+            column_pattern = r'\.\"([a-zA-Z_]+)\"'
+
+            table_samples = []
+            for plan in tqdm(plans):
+                table_sample = {}
+                predicates = extract_numeric_predicates(plan['sql'])
+                # print(plan['sql'])
+                for predicate in predicates:
+                    try:
+                        table_name = re.search(table_pattern, predicate).group(1)
+                        column_name = re.search(column_pattern, predicate).group(1)
+                        if column_type[table_name][column_name] == 'char':
+                            continue
+                        q = 'select sid from {} where {}'.format(table_name, predicate)
+                        cur.execute(q)
+                        sps = np.zeros(1000).astype('uint8')
+                        sids = cur.fetchall()
+                        sids = np.array(sids).squeeze()
+                        if sids.size>1:
+                            sps[sids] = 1
+                        if table_name in table_sample:
+                            table_sample[table_name] = table_sample[table_name] & sps
+                        else:
+                            table_sample[table_name] = sps
+                    except Exception as e:
+                        print(f"Error: {e}")
+                # if len(table_sample) > 0:
+                table_samples.append(table_sample)
+
+            # Save table_samples to file
+            with open(table_sample_file, 'wb') as f:
+                pickle.dump(table_samples, f)
+                print('Saved table_samples to file.')
+        cur.close()
+        conn.close()
+        print(f"table_samples length: {len(table_samples)}")
+        return table_samples
+
 
     def js_node2dict(self, idx, node):
         treeNode = self.traversePlan(node, idx, self.encoding)
@@ -59,7 +218,7 @@ class PlanTreeDataset(Dataset):
     
     def __getitem__(self, idx):
         
-        return self.collated_dicts[idx], (self.cost_labels[idx], self.card_labels[idx])
+        return self.collated_dicts[idx], self.labels[idx]
 
     def old_getitem(self, idx):
         return self.dicts[idx], (self.cost_labels[idx], self.card_labels[idx])
@@ -205,7 +364,14 @@ def node2feature(node, encoding, hist_file, table_sample):
 
     # table, bitmap, 1 + 1000 bits
     table = np.array([node.table_id])
-    if node.table_id == 0:
+    # print(f"length of table_sample: {len(table_sample)}")
+    # print(f"node.query_id: {node.query_id}")
+    # print(f"node: {node}")
+    # print(f"node.table_id: {node.table_id}")
+    # print(f"node.table: {node.table}")
+    # print(f"table_sample: {table_sample}")
+    # print(f"table_sample[node.query_id]: {table_sample[node.query_id]}")
+    if node.table_id == 0 or node.table not in table_sample[node.query_id]:
         sample = np.zeros(1000)
     else:
         sample = table_sample[node.query_id][node.table]

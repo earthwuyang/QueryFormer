@@ -30,6 +30,7 @@ class Prediction(nn.Module):
                 hid = mid
         out = torch.sigmoid(self.out_mlp2(hid))
 
+        out = self.out_mlp2(hid)
         return out
 
         
@@ -44,11 +45,12 @@ class FeatureEmbed(nn.Module):
         self.use_hist = use_hist
         self.bin_number = bin_number
         
-        self.typeEmbed = nn.Embedding(types, embed_size)
-        self.tableEmbed = nn.Embedding(tables, embed_size)
+        self.typeEmbed = nn.Embedding(types + 1, embed_size)
         
-        self.columnEmbed = nn.Embedding(columns, embed_size)
-        self.opEmbed = nn.Embedding(ops, embed_size//8)
+        self.tableEmbed = nn.Embedding(tables + 1, embed_size)
+        
+        self.columnEmbed = nn.Embedding(columns + 1, embed_size)
+        self.opEmbed = nn.Embedding(ops + 1, embed_size//8)
 
         self.linearFilter2 = nn.Linear(embed_size+embed_size//8+1, embed_size+embed_size//8+1)
         self.linearFilter = nn.Linear(embed_size+embed_size//8+1, embed_size+embed_size//8+1)
@@ -61,7 +63,9 @@ class FeatureEmbed(nn.Module):
         
         self.linearHist = nn.Linear(bin_number, embed_size)
 
-        self.joinEmbed = nn.Embedding(joins, embed_size)
+        self.joinEmbed = nn.Embedding(joins + 1, embed_size)
+        if torch.isnan(self.typeEmbed.weight).any():
+            raise ValueError("Embedding layer weights contain NaNs immediately after initialization.")
         
         if use_hist:
             self.project = nn.Linear(embed_size*5 + embed_size//8+1, embed_size*5 + embed_size//8+1)
@@ -70,9 +74,12 @@ class FeatureEmbed(nn.Module):
     
     # input: B by 14 (type, join, f1, f2, f3, mask1, mask2, mask3)
     def forward(self, feature):
-
+        # print(f"torch.isnan(self.typeEmbed.weight).any(): {torch.isnan(self.typeEmbed.weight).any()}")
+        if torch.isnan(self.typeEmbed.weight).any():
+            raise ValueError("Embedding layer weights contain NaNs on in forward.")
+        # print(f"torch.isnan(feature).any(): {torch.isnan(feature).any()}")
         typeId, joinId, filtersId, filtersMask, hists, table_sample = torch.split(feature,(1,1,9,3,self.bin_number*3,1001), dim = -1)
-        
+        # print(f"torch.isnan(typeId).any(): {torch.isnan(typeId).any()}, torch.isnan(joinId).any(): {torch.isnan(joinId).any()}, torch.isnan(filtersId).any(): {torch.isnan(filtersId).any()}, torch.isnan(filtersMask).any(): {torch.isnan(filtersMask).any()}, torch.isnan(hists).any(): {torch.isnan(hists).any()}, torch.isnan(table_sample).any(): {torch.isnan(table_sample).any()}")
         typeEmb = self.getType(typeId)
         joinEmb = self.getJoin(joinId)
         filterEmbed = self.getFilter(filtersId, filtersMask)
@@ -89,6 +96,17 @@ class FeatureEmbed(nn.Module):
         return final
     
     def getType(self, typeId):
+      
+        if torch.isnan(self.typeEmbed.weight).any():
+            raise ValueError("Embedding layer weights contain NaNs after initialization.")
+        if torch.isnan(typeId).any():
+            raise ValueError("NaN values detected in typeId!")
+        
+        # Ensure indices are within the valid range
+        max_index = self.typeEmbed.num_embeddings - 1
+        if (typeId < 0).any() or (typeId > max_index).any():
+            raise IndexError(f"typeId contains indices out of range (0 to {max_index})")
+        
         emb = self.typeEmbed(typeId.long())
 
         return emb.squeeze(1)
@@ -116,7 +134,8 @@ class FeatureEmbed(nn.Module):
         ## avg by # of filters
         num_filters = torch.sum(filtersMask,dim = 1)
         total = torch.sum(emb, dim = 1)
-        avg = total / num_filters.view(-1,1)
+        avg = total / (num_filters.view(-1,1)+1e-10)
+        avg = torch.where(num_filters.view(-1,1)>0, avg, torch.zeros_like(avg))
         
         return avg
         
@@ -128,7 +147,6 @@ class FeatureEmbed(nn.Module):
         vals = filterExpand[:,:,2].unsqueeze(-1) # b by 3 by 1
         
         # b by 3 by embed_dim
-        
         col = self.columnEmbed(colsId)
         op = self.opEmbed(opsId)
         
@@ -141,8 +159,14 @@ class FeatureEmbed(nn.Module):
         
         ## avg by # of filters
         num_filters = torch.sum(filtersMask,dim = 1)
+
+    
+       
         total = torch.sum(concat, dim = 1)
-        avg = total / num_filters.view(-1,1)
+        
+        avg = total / (num_filters.view(-1,1) + 1e-10)
+        avg = torch.where(num_filters.view(-1,1)>0, avg, torch.zeros_like(avg))
+        avg = total / (num_filters.view(-1,1) + 1e-10)
                 
         return avg
     
@@ -153,11 +177,10 @@ class FeatureEmbed(nn.Module):
 
 
 class QueryFormer(nn.Module):
-    def __init__(self, emb_size = 32 ,ffn_dim = 32, head_size = 8, \
-                 dropout = 0.1, attention_dropout_rate = 0.1, n_layers = 8, \
-                 use_sample = True, use_hist = True, bin_number = 50, \
-                 pred_hid = 256
-                ):
+    def __init__(self, emb_size = 32 ,ffn_dim = 32, head_size = 8, 
+                 dropout = 0.1, attention_dropout_rate = 0.1, n_layers = 8, 
+                 use_sample = True, use_hist = True, bin_number = 50, 
+                 pred_hid = 256, joins=0, tables=0, types=0, columns=0 ):
         
         super(QueryFormer,self).__init__()
         if use_hist:
@@ -184,7 +207,7 @@ class QueryFormer(nn.Module):
         self.super_token_virtual_distance = nn.Embedding(1, head_size)
         
         
-        self.embbed_layer = FeatureEmbed(emb_size, use_sample = use_sample, use_hist = use_hist, bin_number = bin_number)
+        self.embbed_layer = FeatureEmbed(emb_size, use_sample = use_sample, use_hist = use_hist, bin_number = bin_number, joins=joins, tables=tables, types=types, columns=columns)
         
         self.pred = Prediction(hidden_dim, pred_hid)
 

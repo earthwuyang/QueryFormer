@@ -21,51 +21,77 @@ def floyd_warshall_rewrite(adjacency_matrix):
                 M[i][j] = min(M[i][j], M[i][k]+M[k][j])
     return M
 
-def get_job_table_sample(workload_file_name, num_materialized_samples = 1000):
 
-    tables = []
-    samples = []
+# def get_job_table_sample(plans, table_sample, num_materialized_samples = 1000):
+#     import pickle
+#     import os
+#     data_dir = '/home/wuy/DB/pg_mem_data'
+#     tmp_data_dir = 'data/tpcds_sf1'
 
-    # Load queries
-    with open(workload_file_name + ".csv", 'r') as f:
-        data_raw = list(list(rec) for rec in csv.reader(f, delimiter='#'))
-        for row in data_raw:
-            tables.append(row[0].split(','))
+#     # load table_sample from file if exists
+#     table_sample_file = os.path.join(tmp_data_dir, 'table_samples.pkl')
+#     with open(table_sample_file, 'rb') as f:
+#         table_sample = pickle.load(f)
+#         return table_sample
 
-            if int(row[3]) < 1:
-                print("Queries must have non-zero cardinalities")
-                exit(1)
 
-    print("Loaded queries with len ", len(tables))
+
+# def get_job_table_sample(plans, table_sample_file, num_materialized_samples = 1000):
+
+#     tables = []
+#     samples = []
+#     import os
+#     import pickle
+#     tmp_data_dir = 'data/tpcds_sf1'
+#     table_sample_file = os.path.join(tmp_data_dir, 'table_samples.pkl')
+#     with open(table_sample_file, 'rb') as f:
+#         table_sample = pickle.load(f)
+#     for plan in plans:
+
+
+#     # Load queries
+#     with open(workload_file_name + ".csv", 'r') as f:
+#         data_raw = list(list(rec) for rec in csv.reader(f, delimiter='#'))
+#         for row in data_raw:
+#             tables.append(row[0].split(','))
+
+#             if int(row[3]) < 1:
+#                 print("Queries must have non-zero cardinalities")
+#                 exit(1)
+
+#     print("Loaded queries with len ", len(tables))
     
-    # Load bitmaps
-    num_bytes_per_bitmap = int((num_materialized_samples + 7) >> 3)
-    with open(workload_file_name + ".bitmaps", 'rb') as f:
-        for i in range(len(tables)):
-            four_bytes = f.read(4)
-            if not four_bytes:
-                print("Error while reading 'four_bytes'")
-                exit(1)
-            num_bitmaps_curr_query = int.from_bytes(four_bytes, byteorder='little')
-            bitmaps = np.empty((num_bitmaps_curr_query, num_bytes_per_bitmap * 8), dtype=np.uint8)
-            for j in range(num_bitmaps_curr_query):
-                # Read bitmap
-                bitmap_bytes = f.read(num_bytes_per_bitmap)
-                if not bitmap_bytes:
-                    print("Error while reading 'bitmap_bytes'")
-                    exit(1)
-                bitmaps[j] = np.unpackbits(np.frombuffer(bitmap_bytes, dtype=np.uint8))
-            samples.append(bitmaps)
-    print("Loaded bitmaps")
-    table_sample = []
-    for ts, ss in zip(tables,samples):
-        d = {}
-        for t, s in zip(ts,ss):
-            tf = t.split(' ')[0] # remove alias
-            d[tf] = s
-        table_sample.append(d)
+#     # Load bitmaps
+#     num_bytes_per_bitmap = int((num_materialized_samples + 7) >> 3)
+#     with open(workload_file_name + ".bitmaps", 'rb') as f:
+#         for i in range(len(tables)):
+#             four_bytes = f.read(4)
+#             if not four_bytes:
+#                 print("Error while reading 'four_bytes'")
+#                 exit(1)
+#             num_bitmaps_curr_query = int.from_bytes(four_bytes, byteorder='little')
+#             bitmaps = np.empty((num_bitmaps_curr_query, num_bytes_per_bitmap * 8), dtype=np.uint8)
+#             for j in range(num_bitmaps_curr_query):
+#                 # Read bitmap
+#                 bitmap_bytes = f.read(num_bytes_per_bitmap)
+#                 if not bitmap_bytes:
+#                     print("Error while reading 'bitmap_bytes'")
+#                     exit(1)
+#                 bitmaps[j] = np.unpackbits(np.frombuffer(bitmap_bytes, dtype=np.uint8))
+#             samples.append(bitmaps)
+#     print("Loaded bitmaps")
+#     table_sample = []
+#     for ts, ss in zip(tables,samples):
+#         d = {}
+#         for t, s in zip(ts,ss):
+#             tf = t.split(' ')[0] # remove alias
+#             d[tf] = s
+#         table_sample.append(d)
     
-    return table_sample
+#     return table_sample
+
+def get_job_table_sample(plans, table_sample_file, num_materialized_samples = 1000):
+    pass
 
 
 def get_hist_file(hist_path, bin_number = 50):
@@ -87,7 +113,7 @@ def get_hist_file(hist_path, bin_number = 50):
 
     for rid in range(len(hist_file)):
         hist_file['bins'][rid] = \
-            [int(i) for i in hist_file['bins'][rid][1:-1].split(' ') if len(i)>0]
+            [int(float(i)) for i in hist_file['bins'][rid][1:-1].split(' ') if len(i)>0]
 
     if bin_number != 50:
         hist_file = re_bin(hist_file, bin_number)
@@ -333,13 +359,20 @@ class Encoding:
             filt = ''.join(c for c in filt if c not in '()')
             fs = filt.split(' AND ')
             for f in fs:
-     #           print(filters)
-                col, op, num = f.split(' ')
-                column = alias + '.' + col
+                try:
+                    col, op, num = f.split(' ', maxsplit=2)
+                except Exception as e:
+                    print(f"Error in filter: {f}")
+                    continue
+                if isinstance(num, str):
+                    continue
+                column = col
+                column = column.replace('::text', '').replace('::numeric', '')
+                # print(f"column: {column}")
     #            print(f)
                 
                 res['colId'].append(self.col2idx[column])
-                res['opId'].append(self.op2idx[op])
+                res['opId'].append(self.op2idx[op] if op in self.op2idx else self.op2idx['NA'])
                 res['val'].append(self.normalize_val(column, float(num)))
         return res
     
