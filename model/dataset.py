@@ -1,3 +1,4 @@
+# model/dataset.py
 import torch
 from torch.utils.data import Dataset
 import numpy as np
@@ -19,6 +20,7 @@ class PlanTreeDataset(Dataset):
         # train = train.loc[json_df['id']]
         
         nodes = [json.loads(plan)['Plan'] for plan in json_df['json']]
+        
         self.cards = [node['Actual Rows'] for node in nodes]
         self.costs = [json.loads(plan)['Execution Time'] for plan in json_df['json']]
         
@@ -45,8 +47,17 @@ class PlanTreeDataset(Dataset):
         self.collated_dicts = [self.js_node2dict(i,node) for i,node in zip(idxs, nodes)]
 
     def js_node2dict(self, idx, node):
+        '''
+        Converts a JSON plan node to a structured dictionary 
+        that can be collated by the pre-collate function.
+        '''
+        # create a tree structure from the query plan node
         treeNode = self.traversePlan(node, idx, self.encoding)
+
+        # convert the tree structure to a dictionary
         _dict = self.node2dict(treeNode)
+
+        # prepare the collated dictionary for model input by padding and proessing features
         collated_dict = self.pre_collate(_dict)
         
         self.treeNodes.clear()
@@ -66,17 +77,21 @@ class PlanTreeDataset(Dataset):
       
     ## pre-process first half of old collator
     def pre_collate(self, the_dict, max_node = 30, rel_pos_max = 20):
-
+        '''
+        Pre-process the node dictionary for model input
+        '''
         x = pad_2d_unsqueeze(the_dict['features'], max_node)
         N = len(the_dict['features'])
+        # initialize an attention bias matrix of zeros with dimensions based on the number of features
         attn_bias = torch.zeros([N+1,N+1], dtype=torch.float)
         
-        edge_index = the_dict['adjacency_list'].t()
+        edge_index = the_dict['adjacency_list'].t() # transpose the adjacency list for graph processing
         if len(edge_index) == 0:
             shortest_path_result = np.array([[0]])
             path = np.array([[0]])
             adj = torch.tensor([[0]]).bool()
         else:
+            # initialize an adjacency matrix based on the edge_index
             adj = torch.zeros([N,N], dtype=torch.bool)
             adj[edge_index[0,:], edge_index[1,:]] = True
             
@@ -87,13 +102,15 @@ class PlanTreeDataset(Dataset):
         
         attn_bias[1:, 1:][rel_pos >= rel_pos_max] = float('-inf')
         
+        # pad the attention bias to match the required input shape for the model
         attn_bias = pad_attn_bias_unsqueeze(attn_bias, max_node + 1)
+        # pad the relative positions to match the required input shape
         rel_pos = pad_rel_pos_unsqueeze(rel_pos, max_node)
 
         heights = pad_1d_unsqueeze(the_dict['heights'], max_node)
         
         return {
-            'x' : x,
+            'x' : x, # features
             'attn_bias': attn_bias,
             'rel_pos': rel_pos,
             'heights': heights
@@ -101,6 +118,9 @@ class PlanTreeDataset(Dataset):
 
 
     def node2dict(self, treeNode):
+        '''
+        Converts a tree node into a structured dictionary format
+        '''
 
         adj_list, num_child, features = self.topo_sort(treeNode)
         heights = self.calculate_height(adj_list, len(features))
@@ -113,19 +133,30 @@ class PlanTreeDataset(Dataset):
         }
     
     def topo_sort(self, root_node):
+        '''
+        Performs a topological sort on the tree to get the adjacency list and features
+        '''
 #        nodes = []
         adj_list = [] #from parent to children
         num_child = []
         features = []
 
+        # initialize a deque for BFS traaversal and adds the root node to visit, 
+        # starting with an index of 0 for the root
         toVisit = deque()
         toVisit.append((0,root_node))
         next_id = 1
+
+        # Loops wihle there are nodes to visit, popping the next node from the deque
         while toVisit:
             idx, node = toVisit.popleft()
-#            nodes.append(node)
+            # nodes.append(node)
             features.append(node.feature)
             num_child.append(len(node.children))
+
+            # iterate through the children of the current node, 
+            # add them to the `toVisit` deque, and builds the adjacency list, 
+            # assigning a new ID for each child
             for child in node.children:
                 toVisit.append((next_id,child))
                 adj_list.append((idx,next_id))
@@ -134,6 +165,9 @@ class PlanTreeDataset(Dataset):
         return adj_list, num_child, features
     
     def traversePlan(self, plan, idx, encoding): # bfs accumulate plan
+        '''
+        Recursively constructs a tree structure from a JSON query plan
+        '''
 
         nodeType = plan['Node Type']
         typeId = encoding.encode_type(nodeType)
@@ -151,7 +185,6 @@ class PlanTreeDataset(Dataset):
             root.table = plan['Relation Name']
             root.table_id = encoding.encode_table(plan['Relation Name'])
         root.query_id = idx
-        
         root.feature = node2feature(root, encoding, self.hist_file, self.table_sample)
         #    print(root)
         if 'Plans' in plan:
@@ -171,28 +204,39 @@ class PlanTreeDataset(Dataset):
         node_order = np.zeros(tree_size, dtype=int)
         uneval_nodes = np.ones(tree_size, dtype=bool)
 
+        # Separate the parent and child nodes from the adjacency list
         parent_nodes = adj_list[:,0]
         child_nodes = adj_list[:,1]
 
+        # loops while there are nodes that haven't been evaluated,
         n = 0
         while uneval_nodes.any():
+            # creating a mask for unevaluated child nodes and a mask for unready parents
             uneval_mask = uneval_nodes[child_nodes]
             unready_parents = parent_nodes[uneval_mask]
 
+            # determine which nodes can be evaluated (i.e. nodes whose parents have been evaluated),
+            # update the node order, and mark the nodes as evaluated, and increment the height counter
             node2eval = uneval_nodes & ~np.isin(node_ids, unready_parents)
             node_order[node2eval] = n
             uneval_nodes[node2eval] = False
             n += 1
+
+        # return the calculated heights for each node based on their order of evaluation
         return node_order 
 
 
 
 def node2feature(node, encoding, hist_file, table_sample):
+    '''
+    Constructs a feature vector for a given tree node
+    '''
     # type, join, filter123, mask123
     # 1, 1, 3x3 (9), 3
     # TODO: add sample (or so-called table)
+
     num_filter = len(node.filterDict['colId'])
-    pad = np.zeros((3,3-num_filter))
+    pad = np.zeros((3, 3-num_filter))
     filts = np.array(list(node.filterDict.values())) #cols, ops, vals
     ## 3x3 -> 9, get back with reshape 3,3
     filts = np.concatenate((filts, pad), axis=1).flatten() 
@@ -203,6 +247,8 @@ def node2feature(node, encoding, hist_file, table_sample):
     hists = filterDict2Hist(hist_file, node.filterDict, encoding)
 
 
+    # If the table ID is 0 (indicating no valid table), a zero array is created;
+    # otherwise, a sample array is extracted based on the query ID and table name.
     # table, bitmap, 1 + 1000 bits
     table = np.array([node.table_id])
     if node.table_id == 0:

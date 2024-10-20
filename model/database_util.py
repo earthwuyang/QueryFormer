@@ -1,3 +1,4 @@
+# database_util.py
 import numpy as np
 import pandas as pd
 import csv
@@ -30,13 +31,13 @@ def get_job_table_sample(workload_file_name, num_materialized_samples = 1000):
     with open(workload_file_name + ".csv", 'r') as f:
         data_raw = list(list(rec) for rec in csv.reader(f, delimiter='#'))
         for row in data_raw:
-            tables.append(row[0].split(','))
+            tables.append(row[0].split(',')) # table names
 
             if int(row[3]) < 1:
                 print("Queries must have non-zero cardinalities")
                 exit(1)
 
-    print("Loaded queries with len ", len(tables))
+    print("Loaded queries with len: ", len(tables))
     
     # Load bitmaps
     num_bytes_per_bitmap = int((num_materialized_samples + 7) >> 3)
@@ -72,22 +73,32 @@ def get_hist_file(hist_path, bin_number = 50):
     hist_file = pd.read_csv(hist_path)
     for i in range(len(hist_file)):
         freq = hist_file['freq'][i]
-        freq_np = np.frombuffer(bytes.fromhex(freq), dtype=float)
-        hist_file['freq'][i] = freq_np
+        freq_np = np.frombuffer(bytes.fromhex(freq), dtype=float) # fromhex() decodes the hex string, and frombuffer() converts it into a numpy array
+        # print(f"len of freq_np: {len(freq_np)}")
+        hist_file.loc[i, 'freq'] = freq_np
 
     table_column = []
     for i in range(len(hist_file)):
         table = hist_file['table'][i]
         col = hist_file['column'][i]
-        table_alias = ''.join([tok[0] for tok in table.split('_')])
+        table_alias = ''.join([tok[0] for tok in table.split('_')]) # The alias for the table is created by taking the first letter of each word in the table name split by '_'
         if table == 'movie_info_idx': table_alias = 'mi_idx'
         combine = '.'.join([table_alias,col])
         table_column.append(combine)
     hist_file['table_column'] = table_column
 
     for rid in range(len(hist_file)):
+        # print(f"before, hist_file['bins'][rid]: {hist_file['bins'][rid]}")
+        # print(type(hist_file['bins'][rid])) # str
         hist_file['bins'][rid] = \
             [int(i) for i in hist_file['bins'][rid][1:-1].split(' ') if len(i)>0]
+        # print(f"after, hist_file['bins'][rid]: {hist_file['bins'][rid]}")
+        # print(type(hist_file['bins'][rid])) # list
+
+        # hist_file.loc[rid, 'bins'] = \
+        #     pd.Series([int(i) for i in hist_file['bins'][rid][1:-1].split(' ') if len(i)>0])  
+        # len(i) ensures that i is not an empty string.
+        # [1:-1] removes the '[' and ']' from the string which are the first and last character of hist_file['bins'][rid]
 
     if bin_number != 50:
         hist_file = re_bin(hist_file, bin_number)
@@ -205,6 +216,8 @@ def filterDict2Hist(hist_file, filterDict, encoding):
     buckets = len(hist_file['bins'][0]) 
     empty = np.zeros(buckets - 1)
     ress = np.zeros((3, buckets-1))
+    # if len(filterDict['colId']) >1:
+    #     print("!!!!!!: only support one column filter")
     for i in range(len(filterDict['colId'])):
         colId = filterDict['colId'][i]
         col = encoding.idx2col[colId]
@@ -287,8 +300,6 @@ def formatFilter(plan):
     if 'Recheck Cond' in plan:
         filters.append(plan['Recheck Cond'])
         
-    
-    
     return filters, alias
 
 class Encoding:

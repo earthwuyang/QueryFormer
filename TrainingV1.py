@@ -1,3 +1,5 @@
+# main.py
+
 # %%
 import numpy as np
 import os
@@ -74,7 +76,7 @@ to_predict = 'cost'
 imdb_path = './data/imdb/'
 dfs = []  # list to hold DataFrames
 # SQ: added
-for i in range(2):
+for i in range(1):
 #for i in range(18):
     file = imdb_path + 'plan_and_cost/train_plan_part{}.csv'.format(i)
     df = pd.read_csv(file)
@@ -83,7 +85,7 @@ for i in range(2):
 full_train_df = pd.concat(dfs)
 
 val_dfs = []  # list to hold DataFrames
-for i in range(18,20):
+for i in range(1):
     file = imdb_path + 'plan_and_cost/train_plan_part{}.csv'.format(i)
     df = pd.read_csv(file)
     val_dfs.append(df)

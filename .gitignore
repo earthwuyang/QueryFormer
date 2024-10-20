@@ -1,2 +1,9 @@
 .venv/
 
+data/
+*.pt
+test_files_open_source/
+*tar*
+*.zip
+*.gz
+*.tar.gz

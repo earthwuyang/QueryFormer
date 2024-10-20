@@ -1,3 +1,4 @@
+# model/trainer.py
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -36,12 +37,12 @@ def print_qerror(preds_unnorm, labels_unnorm, prints=False):
 
     return res
 
-def get_corr(ps, ls): # unnormalised
-    ps = np.array(ps)
-    ls = np.array(ls)
-    corr, _ = pearsonr(np.log(ps), np.log(ls))
+# def get_corr(ps, ls): # unnormalised
+#     ps = np.array(ps)
+#     ls = np.array(ls)
+#     corr, _ = pearsonr(np.log(ps), np.log(ls))
     
-    return corr
+#     return corr
 
 
 def eval_workload(workload, methods):
@@ -76,10 +77,10 @@ def evaluate(model, ds, bs, norm, device, prints=False):
 
             cost_predss = np.append(cost_predss, cost_preds.cpu().detach().numpy())
     scores = print_qerror(norm.unnormalize_labels(cost_predss), ds.costs, prints)
-    corr = get_corr(norm.unnormalize_labels(cost_predss), ds.costs)
-    if prints:
-        print('Corr: ',corr)
-    return scores, corr
+    # corr = get_corr(norm.unnormalize_labels(cost_predss), ds.costs)
+    # if prints:
+    #     print('Corr: ',corr)
+    return scores, None
 
 def train(model, train_ds, val_ds, crit, \
     cost_norm, args, optimizer=None, scheduler=None):
