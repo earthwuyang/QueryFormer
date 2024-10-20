@@ -7,3 +7,8 @@ test_files_open_source/
 *.zip
 *.gz
 *.tar.gz
+*.sql
+*.db
+
+*.pkl
+*.pickle
