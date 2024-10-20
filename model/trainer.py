@@ -75,6 +75,11 @@ def train(model, train_ds, val_ds, test_ds, crit, \
     if not scheduler:
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 20, 0.7)
 
+    # Early stopping parameters
+    patience = 10
+    min_delta = 0.001
+    best_val_score = float('inf')
+    epochs_no_improve = 0
 
     t0 = time.time()
 
@@ -131,6 +136,17 @@ def train(model, train_ds, val_ds, test_ds, crit, \
                     best_model_path = logging(args, epoch, test_scores, filename = 'log.txt', save_model = True, model = model)
                     best_prev = test_scores['qerror_50 (Median)']
 
+                # Early stopping check
+                if test_scores['qerror_50 (Median)'] < best_val_score - min_delta:
+                    best_val_score = test_scores['qerror_50 (Median)']
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+
+                if epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch}")
+                    break
+
             if epoch % 1 == 0:
                 print('Epoch: {}  Avg Loss: {}, Time: {}'.format(epoch,losses/len(train_ds), time.time()-t0))
                 cost_unnorm = mem_scaler.inverse_transform(np.array(cost_predss).reshape(-1,1)).flatten()
@@ -178,4 +194,4 @@ def logging(args, epoch, qscores, filename = None, save_model = False, model = N
             'args' : args
         }, model_checkpoint)
     
-    return res['model']  
+    return res['model']
